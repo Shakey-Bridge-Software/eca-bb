@@ -8,7 +8,7 @@ Terminal-first AI coding assistant that talks the ECA protocol over stdin/stdout
 
 ## Status
 
-Step 1 (transport) complete and REPL-verified. Steps 2-3 remain for MVP-0.
+Steps 1-3 complete. MVP-0 implemented.
 
 ## Architecture
 
@@ -18,15 +18,16 @@ reader thread → LinkedBlockingQueue → program/cmd (drain batch) → update �
 
 - `server.clj` — spawn ECA process, JSON-RPC Content-Length framing, reader thread + queue
 - `protocol.clj` — message constructors, request ID tracking, response correlation
-- `state.clj` — Elm state machine (init/update), mode dispatch (TODO)
-- `view.clj` — pure rendering: chat, tools, approval, status (TODO)
-- `core.clj` — entry point, arg parsing, charm.clj program/run (TODO)
+- `state.clj` — Elm state machine (init/update), mode dispatch
+- `view.clj` — pure rendering: chat lines, tools, approval, status bar
+- `core.clj` — entry point, arg parsing, charm.clj program/run
 
 ## MVP-0 Scope
 
 - Spawn + initialize + shutdown
 - Single chat with streaming text
-- Tool calls with approval (y/n)
+- Tool calls with approval (y/n/Y)
+- Trust mode (`--trust` flag, safe by default)
 - Prompt stop (Esc)
 - Graceful shutdown + terminal cleanup on crash
 
@@ -34,10 +35,11 @@ reader thread → LinkedBlockingQueue → program/cmd (drain batch) → update �
 
 - Model/agent pickers
 - Reasoning blocks
-- Trust mode (`--trust`)
+- Trust from config file
 - File context (`--file`, `/file`)
 - Usage display
 - Collapsible tool blocks
+- Word-wrap / scroll accuracy for long lines
 
 ## Running
 
