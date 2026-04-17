@@ -1,6 +1,16 @@
-{:paths ["src"]
+{:paths ["src" "test"]
  :deps {de.timokramer/charm.clj {:mvn/version "0.2.69"}}
- :tasks {run {:doc "Run eca-bb"
-              :task (exec 'eca-bb.core/-main)}
+ :tasks {run   {:doc "Run eca-bb"
+                :task (exec 'eca-bb.core/-main)}
          nrepl {:doc "Start nREPL for development"
-                :task (exec 'nrepl.cmdline/-main)}}}
+                :task (exec 'nrepl.cmdline/-main)}
+         test  {:doc "Run unit tests"
+                :task (do (require '[clojure.test])
+                          (require '[eca-bb.protocol-test])
+                          (require '[eca-bb.view-test])
+                          (require '[eca-bb.state-test])
+                          (let [{:keys [fail error]}
+                                (clojure.test/run-tests 'eca-bb.protocol-test
+                                                        'eca-bb.view-test
+                                                        'eca-bb.state-test)]
+                            (System/exit (if (pos? (+ fail error)) 1 0))))}}}
