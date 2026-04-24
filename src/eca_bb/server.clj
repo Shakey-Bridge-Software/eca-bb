@@ -1,7 +1,7 @@
 (ns eca-bb.server
   (:require [cheshire.core :as json]
             [babashka.process :as proc])
-  (:import [java.io BufferedReader InputStreamReader BufferedWriter OutputStreamWriter]
+  (:import [java.io BufferedInputStream BufferedWriter OutputStreamWriter]
            [java.util.concurrent LinkedBlockingQueue TimeUnit]))
 
 (defn find-eca-binary
@@ -41,7 +41,7 @@
                         :inherit))
          p      (proc/process [binary "server"]
                               {:err err :shutdown proc/destroy-tree})
-         reader (BufferedReader. (InputStreamReader. (:out p) "UTF-8"))
+         reader (BufferedInputStream. (:out p))
          writer (BufferedWriter. (OutputStreamWriter. (:in p) "UTF-8"))
          queue (LinkedBlockingQueue.)]
      {:process p
@@ -52,35 +52,47 @@
 
 ;; --- JSON-RPC framing ---
 
+(defn- read-line-from-stream
+  "Reads one CRLF-terminated line from a BufferedInputStream. Returns nil on EOF."
+  [^BufferedInputStream stream]
+  (let [sb (StringBuilder.)]
+    (loop []
+      (let [b (.read stream)]
+        (cond
+          (= b -1)           (when (pos? (.length sb)) (.toString sb))
+          (= b (int \return)) (do (.read stream) (.toString sb)) ;; consume \n
+          (= b (int \newline)) (.toString sb)
+          :else              (do (.append sb (char b)) (recur)))))))
+
 (defn- read-content-length
-  "Reads headers from the reader until the blank line, extracts Content-Length."
-  [^BufferedReader reader]
+  "Reads headers from the stream until the blank line, returns Content-Length."
+  [^BufferedInputStream stream]
   (loop [content-length nil]
-    (let [line (.readLine reader)]
+    (let [line (read-line-from-stream stream)]
       (cond
-        (nil? line) nil ;; EOF
-        (= "" line) content-length ;; blank line = end of headers
+        (nil? line) nil
+        (= "" line) content-length
         :else
         (let [cl (when (.startsWith line "Content-Length: ")
                    (parse-long (subs line 16)))]
           (recur (or cl content-length)))))))
 
 (defn- read-body
-  "Reads exactly n chars from the reader."
-  [^BufferedReader reader n]
-  (let [buf (char-array n)]
+  "Reads exactly n bytes from the stream and decodes as UTF-8."
+  [^BufferedInputStream stream n]
+  (let [buf (byte-array n)]
     (loop [offset 0]
       (when (< offset n)
-        (let [read (.read reader buf offset (- n offset))]
+        (let [read (.read stream buf offset (- n offset))]
           (when (pos? read)
             (recur (+ offset read))))))
-    (String. buf)))
+    (String. buf "UTF-8")))
 
 (defn read-message!
-  "Blocking read of one JSON-RPC message from the reader. Returns parsed map or nil on EOF."
-  [^BufferedReader reader]
-  (when-let [content-length (read-content-length reader)]
-    (let [body (read-body reader content-length)]
+  "Blocking read of one JSON-RPC message from the stream. Returns parsed map or nil on EOF."
+  [^BufferedInputStream stream]
+  (when-let [content-length (read-content-length stream)]
+    (let [body (read-body stream content-length)]
       (json/parse-string body true))))
 
 (defn write-message!

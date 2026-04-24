@@ -54,6 +54,28 @@
 (defn prompt-stop-params [chat-id]
   {:chatId chat-id})
 
+;; --- Provider / login ---
+
+(defn providers-list!
+  "Lists all providers and their auth status."
+  [srv callback]
+  (send-request! srv "providers/list" {} callback))
+
+(defn providers-login!
+  "Initiates login for a provider. Pass nil method on first call to get available methods."
+  [srv provider method callback]
+  (send-request! srv "providers/login"
+                 (cond-> {:provider provider}
+                   method (assoc :method method))
+                 callback))
+
+(defn providers-login-input!
+  "Submits collected login input data (API key, auth code, etc.)."
+  [srv provider data callback]
+  (send-request! srv "providers/loginInput"
+                 {:provider provider :data data}
+                 callback))
+
 ;; --- High-level lifecycle ---
 
 (defn initialize!

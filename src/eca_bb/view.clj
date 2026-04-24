@@ -25,6 +25,9 @@
     :tool-call
     [(str (render-tool-icon item) " " (or (:summary item) (:name item)))]
 
+    :system
+    [(str "⚠ " (:text item))]
+
     []))
 
 (defn rebuild-chat-lines [items current-text width]
@@ -60,14 +63,68 @@
   (let [workspace (-> (get-in state [:opts :workspace] ".")
                       java.io.File.
                       .getName)
-        model     (or (:model state) "…")
-        tokens    (some-> (:usage state) :sessionTokens (str " tok"))
+        model     (or (let [sm (:selected-model state)]
+                        (if (map? sm) (:id sm) sm))
+                      (:model state)
+                      "…")
+        usage     (:usage state)
+        tokens    (some-> usage :sessionTokens (str "tok"))
+        cost      (some-> usage :sessionCost)
+        ctx-pct   (when-let [l (:limit usage)]
+                    (when (pos? (:context l))
+                      (str (int (* 100 (/ (:sessionTokens usage) (:context l)))) "%")))
+        loading   (when (some #(not (:done? %)) (vals (:init-tasks state))) "⏳")
         trust     (if (:trust state) "TRUST" "SAFE")]
-    (str/join "  " (remove nil? [workspace model tokens trust]))))
+    (str/join "  " (remove nil? [workspace loading model tokens cost ctx-pct trust]))))
+
+(defn render-login [state]
+  (let [{:keys [provider action field-idx]} (:login state)
+        action-type (:action action)]
+    (case action-type
+      "choose-method"
+      (str/join "\n"
+                (into [(str "🔐 Login required for " provider ". Choose a method:")]
+                      (map-indexed (fn [i m] (str "  [" (inc i) "] " (:label m)))
+                                   (:methods action))))
+
+      "input"
+      (let [field (nth (:fields action) (or field-idx 0) nil)]
+        (str "🔐 Login required for " provider ".\n"
+             "Enter " (:label field) ":"))
+
+      "authorize"
+      (str "🔐 Login required for " provider ".\n"
+           (:message action) "\n"
+           "  URL: " (:url action)
+           (when (seq (:fields action))
+             (let [field (nth (:fields action) (or field-idx 0) nil)]
+               (str "\nEnter " (:label field) " after authorizing:"))))
+
+      "device-code"
+      (str "🔐 Login required for " provider ".\n"
+           (:message action) "\n"
+           "  URL:  " (:url action) "\n"
+           "  Code: " (:code action) "\n"
+           "Waiting for authorization... [Esc to cancel]")
+
+      (str "🔐 Login required for " provider ". [Esc to cancel]"))))
 
 (defn view [state]
-  (let [input-area (if (= :approving (:mode state))
+  (let [mode       (:mode state)
+        input-area (cond
+                     (= :approving mode)
                      (or (render-approval state) "")
+
+                     (= :login mode)
+                     (let [action-type  (get-in state [:login :action :action])
+                           needs-input? (or (= "input" action-type)
+                                            (and (= "authorize" action-type)
+                                                 (seq (get-in state [:login :action :fields]))))]
+                       (if needs-input?
+                         (str (render-login state) "\n" (ti/text-input-view (:input state)))
+                         (render-login state)))
+
+                     :else
                      (ti/text-input-view (:input state)))]
     (str (render-chat state)
          "\n" (divider (:width state))

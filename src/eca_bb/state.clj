@@ -7,6 +7,9 @@
             [eca-bb.protocol :as protocol]
             [eca-bb.view :as view]))
 
+;; Expose last-known state for nREPL inspection
+(def debug-state (atom nil))
+
 ;; --- State helpers ---
 
 (defn- rebuild-lines [state]
@@ -57,6 +60,48 @@
     (program/cmd (fn [] (server/shutdown! srv) nil))
     program/quit-cmd))
 
+(defn- start-login-cmd [srv pending-message]
+  (program/cmd
+    (fn []
+      (let [providers-result (promise)
+            _                (protocol/providers-list! srv
+                               (fn [r] (deliver providers-result (or (:result r) {}))))]
+        (let [providers (-> (deref providers-result 10000 {:providers []}) :providers)
+              provider  (first (filter #(contains? #{"unauthenticated" "expired"}
+                                                   (get-in % [:auth :status]))
+                                       providers))]
+          (if-not provider
+            {:type :eca-error :error "Login required but no unauthenticated provider found"}
+            (let [login-result (promise)
+                  _            (protocol/providers-login! srv (:id provider) nil
+                                 (fn [r] (deliver login-result (or (:result r) (:error r)))))]
+              {:type            :eca-login-action
+               :provider        (:id provider)
+               :action          (deref login-result 10000 nil)
+               :pending-message pending-message})))))))
+
+(defn- choose-login-method-cmd [srv provider method]
+  (program/cmd
+    (fn []
+      (let [result (promise)
+            _      (protocol/providers-login! srv provider method
+                     (fn [r] (deliver result (or (:result r) (:error r)))))]
+        {:type     :eca-login-action
+         :provider provider
+         :action   (deref result 10000 nil)}))))
+
+(defn- submit-login-cmd [srv provider collected pending-message]
+  (program/cmd
+    (fn []
+      (let [result (promise)
+            _      (protocol/providers-login-input! srv provider collected
+                     (fn [r] (deliver result (or (:result r) (:error r)))))]
+        (let [r (deref result 10000 ::timeout)]
+          (cond
+            (= r ::timeout)        {:type :eca-error :error "Login timed out"}
+            (= "done" (:action r)) {:type :eca-login-complete :pending-message pending-message}
+            :else                  {:type :eca-error :error (str "Login failed: " r)}))))))
+
 ;; --- Protocol send helpers ---
 
 (defn- send-chat-prompt! [srv chat-id text opts]
@@ -70,7 +115,8 @@
       (.put (:queue srv)
             {:type    :eca-prompt-response
              :chat-id (:chat-id result)
-             :model   (:model result)}))))
+             :model   (:model result)
+             :status  (:status result)}))))
 
 ;; --- ECA content handler ---
 
@@ -145,25 +191,92 @@
 
       state)))
 
+;; --- Login notification handler ---
+
+(defn- handle-providers-updated [state provider-status]
+  (let [auth-status (get-in provider-status [:auth :status])
+        provider-id (:id provider-status)]
+    (if (and (= :login (:mode state))
+             (contains? #{"authenticated" "expiring"} auth-status)
+             (= provider-id (get-in state [:login :provider])))
+      (let [pending   (:pending-message state)
+            srv       (:server state)
+            opts      (:opts state)
+            new-state (-> state
+                          (assoc :mode :chatting)
+                          (dissoc :login)
+                          (update :input ti/blur))]
+        [new-state (when pending
+                     (program/cmd (fn []
+                                    (send-chat-prompt! srv nil pending opts)
+                                    nil)))])
+      [state nil])))
+
 (defn- handle-eca-notification [state notification]
   (case (:method notification)
-    "chat/contentReceived" (handle-content state (:params notification))
-    state))
+    "chat/contentReceived"
+    [(handle-content state (:params notification)) nil]
+
+    "providers/updated"
+    (handle-providers-updated state (:params notification))
+
+    "$/progress"
+    (let [{:keys [type taskId title]} (:params notification)]
+      [(case type
+         "start"  (assoc-in state [:init-tasks taskId] {:title title :done? false})
+         "finish" (if (contains? (:init-tasks state) taskId)
+                    (assoc-in state [:init-tasks taskId :done?] true)
+                    state)
+         state)
+       nil])
+
+    "$/showMessage"
+    (let [text (or (get-in notification [:params :message]) "Server message")]
+      [(-> state
+           (update :items conj {:type :system :text text})
+           rebuild-lines)
+       nil])
+
+    "config/updated"
+    (let [chat (get-in notification [:params :chat])
+          s'   (cond-> state
+                 (:models chat)                (assoc :available-models (:models chat))
+                 (:agents chat)                (assoc :available-agents (:agents chat))
+                 (contains? chat :selectModel) (assoc :selected-model (:selectModel chat))
+                 (contains? chat :selectAgent) (assoc :selected-agent (:selectAgent chat))
+                 (:welcomeMessage chat)        (update :items conj {:type :assistant-text
+                                                                     :text (:welcomeMessage chat)}))]
+      [(if (:welcomeMessage chat) (rebuild-lines s') s') nil])
+
+    [state nil]))
 
 (defn- handle-eca-tick [state msgs]
   (reduce
-    (fn [s m]
+    (fn [[s cmd] m]
       (cond
+        (= :reader-error (:type m))
+        [(-> s
+             (assoc :mode :ready)
+             (update :items conj {:type :system
+                                   :text (str "ECA disconnected: " (:error m))})
+             (update :input ti/focus)
+             rebuild-lines)
+         nil]
+
         (= :eca-prompt-response (:type m))
-        (cond-> s
-          (:chat-id m) (assoc :chat-id (:chat-id m))
-          (:model m)   (assoc :model (:model m)))
+        (let [s' (cond-> s
+                   (:chat-id m) (assoc :chat-id (:chat-id m))
+                   (:model m)   (assoc :model (:model m)))]
+          (if (= "login" (:status m))
+            [s' (program/batch cmd (start-login-cmd (:server s') (:pending-message s')))]
+            [s' cmd]))
 
         (:method m)
-        (handle-eca-notification s m)
+        (let [[s'' extra-cmd] (handle-eca-notification s m)]
+          [s'' (program/batch cmd extra-cmd)])
 
-        :else s))
-    state
+        :else [s cmd]))
+    [state nil]
     msgs))
 
 ;; --- Init ---
@@ -178,7 +291,13 @@
    :current-text          ""
    :tool-calls            {}
    :pending-approval      nil
+   :pending-message       nil
    :session-trusted-tools #{}
+   :init-tasks            {}
+   :available-models      []
+   :available-agents      []
+   :selected-model        nil
+   :selected-agent        nil
    :input                 (ti/text-input :placeholder "Send a message...")
    :chat-lines            []
    :scroll-offset         0
@@ -199,6 +318,9 @@
 ;; --- Update ---
 
 (defn update-state [state msg]
+  (reset! debug-state {:state (dissoc state :server :input)
+                        :msg-type (or (:type msg) (:method msg))
+                        :queue-size (when-let [q (get-in state [:server :queue])] (.size q))})
   (let [queue (get-in state [:server :queue])]
     (cond
       (= :window-size (:type msg))
@@ -220,8 +342,48 @@
        nil]
 
       (= :eca-tick (:type msg))
-      [(handle-eca-tick state (:msgs msg))
-       (drain-queue-cmd queue)]
+      (let [[new-state extra-cmd] (handle-eca-tick state (:msgs msg))]
+        [new-state (program/batch extra-cmd (drain-queue-cmd queue))])
+
+      ;; Login: action received from providers/login
+      (= :eca-login-action (:type msg))
+      (let [{:keys [provider action]} msg
+            pending (or (:pending-message msg) (get-in state [:login :pending-message]))]
+        (cond
+          (nil? action)
+          [(-> state
+               (assoc :mode :ready)
+               (update :input ti/focus)
+               (update :items conj {:type :system :text "Login failed: timed out"})
+               rebuild-lines)
+           nil]
+
+          (= "done" (:action action))
+          (do
+            (when pending
+              (send-chat-prompt! (:server state) nil pending (:opts state)))
+            [(-> state (assoc :mode :chatting) (dissoc :login) (update :input ti/blur)) nil])
+
+          :else
+          (let [needs-input? (or (= "input" (:action action))
+                                 (and (= "authorize" (:action action))
+                                      (seq (:fields action))))
+                login-state  {:provider        provider
+                               :action          action
+                               :field-idx       0
+                               :collected       {}
+                               :pending-message pending}]
+            [(-> state
+                 (assoc :mode :login :login login-state)
+                 (update :input #(if needs-input? (ti/focus %) (ti/blur %))))
+             nil])))
+
+      ;; Login: input submitted successfully
+      (= :eca-login-complete (:type msg))
+      (let [pending (:pending-message msg)]
+        (when pending
+          (send-chat-prompt! (:server state) nil pending (:opts state)))
+        [(-> state (assoc :mode :chatting) (dissoc :login) (update :input ti/blur)) nil])
 
       (or (msg/quit? msg)
           (and (msg/key-press? msg) (msg/key-match? msg "ctrl+c")))
@@ -234,7 +396,7 @@
         (if (seq text)
           (let [new-state (-> state
                               (update :items conj {:type :user :text text})
-                              (assoc :mode :chatting)
+                              (assoc :mode :chatting :pending-message text)
                               (update :input #(-> % ti/reset ti/blur))
                               rebuild-lines)]
             (send-chat-prompt! (:server state) (:chat-id state) text (:opts state))
@@ -242,12 +404,61 @@
           [state nil]))
 
       (and (msg/key-press? msg)
-           (msg/key-match? msg :esc)
+           (msg/key-match? msg :escape)
            (= :chatting (:mode state)))
       (do
         (when (:chat-id state)
           (protocol/stop-prompt! (:server state) (:chat-id state)))
-        [state nil])
+        [(-> state (assoc :mode :ready) (update :input ti/focus)) nil])
+
+      ;; Login: choose method with digit key
+      (and (msg/key-press? msg)
+           (= :login (:mode state))
+           (= "choose-method" (get-in state [:login :action :action]))
+           (re-matches #"[1-9]" (str (:key msg))))
+      (let [idx    (dec (parse-long (str (:key msg))))
+            methods (get-in state [:login :action :methods])
+            method  (nth methods idx nil)]
+        (if method
+          [state (choose-login-method-cmd (:server state)
+                                          (get-in state [:login :provider])
+                                          (:key method))]
+          [state nil]))
+
+      ;; Login: enter to submit input field
+      (and (msg/key-press? msg)
+           (msg/key-match? msg :enter)
+           (= :login (:mode state))
+           (let [action-type (get-in state [:login :action :action])]
+             (or (= "input" action-type)
+                 (and (= "authorize" action-type)
+                      (seq (get-in state [:login :action :fields]))))))
+      (let [login     (:login state)
+            fields    (get-in login [:action :fields])
+            field     (nth fields (:field-idx login) nil)
+            value     (str/trim (ti/value (:input state)))
+            collected (assoc (:collected login) (:key field) value)
+            next-idx  (inc (:field-idx login))]
+        (if (< next-idx (count fields))
+          [(-> state
+               (update :login assoc :field-idx next-idx :collected collected)
+               (update :input #(-> % ti/reset ti/focus)))
+           nil]
+          [(-> state (update :input #(-> % ti/reset ti/blur)))
+           (submit-login-cmd (:server state)
+                             (:provider login)
+                             collected
+                             (:pending-message login))]))
+
+      ;; Login: escape to cancel
+      (and (msg/key-press? msg)
+           (msg/key-match? msg :escape)
+           (= :login (:mode state)))
+      [(-> state
+           (assoc :mode :ready)
+           (dissoc :login)
+           (update :input ti/focus))
+       nil]
 
       (and (msg/key-press? msg)
            (msg/key-match? msg "y")

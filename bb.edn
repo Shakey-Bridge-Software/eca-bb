@@ -1,9 +1,10 @@
 {:paths ["src" "test"]
  :deps {de.timokramer/charm.clj {:mvn/version "0.2.69"}}
  :tasks {run   {:doc "Run eca-bb"
-                :task (exec 'eca-bb.core/-main)}
+                :requires ([eca-bb.core])
+                :task (apply eca-bb.core/-main *command-line-args*)}
          nrepl {:doc "Start nREPL for development"
-                :task (exec 'nrepl.cmdline/-main)}
+                :task (exec 'nrepl.cmdline/-main {:args ["--port" "7888"]})}
          test  {:doc "Run unit tests"
                 :task (do (require '[clojure.test])
                           (require '[eca-bb.protocol-test])
