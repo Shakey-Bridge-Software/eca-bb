@@ -343,7 +343,7 @@
    :selected-model        nil
    :selected-agent        nil
    :selected-variant      nil
-   :input                 (ti/text-input :placeholder "Send a message...")
+   :input                 (ti/text-input)
    :chat-lines            []
    :scroll-offset         0
    :width                 80
@@ -592,13 +592,15 @@
         [(assoc-in state [:picker :list] new-list) nil])
 
       (and (msg/key-press? msg)
-           (or (msg/key-match? msg :up) (msg/key-match? msg "k"))
+           (or (msg/key-match? msg :up)
+               (and (msg/key-match? msg "k") (= :chatting (:mode state))))
            (not (#{:approving :picking} (:mode state))))
-      (let [max-offset (max 0 (- (count (:chat-lines state)) (- (:height state) 3)))]
+      (let [max-offset (max 0 (- (count (:chat-lines state)) (- (:height state) 5)))]
         [(update state :scroll-offset #(min max-offset (inc %))) nil])
 
       (and (msg/key-press? msg)
-           (or (msg/key-match? msg :down) (msg/key-match? msg "j"))
+           (or (msg/key-match? msg :down)
+               (and (msg/key-match? msg "j") (= :chatting (:mode state))))
            (not (#{:approving :picking} (:mode state))))
       [(update state :scroll-offset #(max 0 (dec %))) nil]
 

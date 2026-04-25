@@ -30,10 +30,10 @@
       (nrepl-server/start-server! {:host "localhost" :port port :quiet true}))
     (.addShutdownHook (Runtime/getRuntime)
                       (Thread. (fn []
-                                 (print "\033[?1049l\033[?25h")
+                                 (print "\033[?25h")
                                  (flush))))
     (program/run {:init       (state/make-init opts)
                   :update     state/update-state
                   :view       view/view
-                  :alt-screen true
+                  :alt-screen false
                   :fps        20})))

@@ -18,10 +18,14 @@
 (defn render-item-lines [item _width]
   (case (:type item)
     :user
-    [(str "You: " (:text item))]
+    ["" (str "\033[7m ❯ " (:text item) " \033[0m") ""]
 
     (:assistant-text :streaming-text)
-    (str/split-lines (str (:text item)))
+    (let [lines (str/split-lines (str (:text item)))]
+      (if (seq lines)
+        (into [(str "◆ " (first lines))]
+              (map #(str "  " %) (rest lines)))
+        []))
 
     :tool-call
     [(str (render-tool-icon item) " " (or (:summary item) (:name item)))]
@@ -45,7 +49,7 @@
       (into (vec (repeat (- height n) "")) lines))))
 
 (defn render-chat [state]
-  (let [visible-height (max 1 (- (:height state) 3))
+  (let [visible-height (max 1 (- (:height state) 5))
         lines          (:chat-lines state)
         total          (count lines)
         offset         (:scroll-offset state)
@@ -53,6 +57,11 @@
         start          (max 0 (- end visible-height))
         visible        (pad-to-height (subvec lines start end) visible-height)]
     (str/join "\n" visible)))
+
+(defn- thinking-pulse []
+  (let [frames ["⠋" "⠙" "⠹" "⠸" "⠼" "⠴" "⠦" "⠧" "⠇" "⠏"]
+        idx    (mod (quot (System/currentTimeMillis) 120) (count frames))]
+    (str "◆ " (nth frames idx))))
 
 (defn render-approval [state]
   (when-let [{:keys [tool-call-id]} (:pending-approval state)]
@@ -125,6 +134,9 @@
                      (= :picking mode)
                      (render-picker state)
 
+                     (= :chatting mode)
+                     ""
+
                      (= :login mode)
                      (let [action-type  (get-in state [:login :action :action])
                            needs-input? (or (= "input" action-type)
@@ -135,8 +147,13 @@
                          (render-login state)))
 
                      :else
-                     (ti/text-input-view (:input state)))]
+                     (ti/text-input-view (:input state)))
+        gutter     (if (and (= :chatting mode) (empty? (:current-text state)))
+                     (thinking-pulse)
+                     "")]
     (str (render-chat state)
+         "\n" gutter
          "\n" (divider (:width state))
          "\n" input-area
+         "\n" (divider (:width state))
          "\n" (render-status-bar state))))

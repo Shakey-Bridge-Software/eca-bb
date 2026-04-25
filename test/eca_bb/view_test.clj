@@ -23,17 +23,26 @@
   (is (= "⏳" (render-tool-icon {:state :unknown}))))
 
 (deftest render-item-lines-test
-  (testing ":user item"
+  (testing ":user item — 3 lines with symbol and reverse-video highlight"
     (let [lines (view/render-item-lines {:type :user :text "hello"} 80)]
-      (is (= ["You: hello"] lines))))
+      (is (= 3 (count lines)))
+      (is (= "" (first lines)))
+      (is (clojure.string/includes? (second lines) "❯"))
+      (is (clojure.string/includes? (second lines) "hello"))
+      (is (= "" (last lines)))))
 
-  (testing ":assistant-text item"
+  (testing ":assistant-text item — ◆ prefix on first line, indent on rest"
     (let [lines (view/render-item-lines {:type :assistant-text :text "line1\nline2"} 80)]
-      (is (= ["line1" "line2"] lines))))
+      (is (= 2 (count lines)))
+      (is (clojure.string/starts-with? (first lines) "◆ "))
+      (is (clojure.string/includes? (first lines) "line1"))
+      (is (clojure.string/starts-with? (second lines) "  "))
+      (is (clojure.string/includes? (second lines) "line2"))))
 
-  (testing ":streaming-text item"
+  (testing ":streaming-text item — ◆ prefix"
     (let [lines (view/render-item-lines {:type :streaming-text :text "streaming"} 80)]
-      (is (= ["streaming"] lines))))
+      (is (= 1 (count lines)))
+      (is (clojure.string/starts-with? (first lines) "◆ "))))
 
   (testing ":tool-call with summary"
     (let [lines (view/render-item-lines {:type :tool-call :state :called :summary "read foo.clj"} 80)]
@@ -57,24 +66,28 @@
   (testing "empty"
     (is (= [] (view/rebuild-chat-lines [] "" 80))))
 
-  (testing "single user item"
+  (testing "single user item — 3 lines (empty, content, empty)"
     (let [lines (view/rebuild-chat-lines [{:type :user :text "hi"}] "" 80)]
-      (is (= ["You: hi"] lines))))
+      (is (= 3 (count lines)))
+      (is (clojure.string/includes? (second lines) "hi"))))
 
-  (testing "multiple items"
+  (testing "multiple items — user (3 lines) + assistant (1 line)"
     (let [lines (view/rebuild-chat-lines
                   [{:type :user :text "hi"}
                    {:type :assistant-text :text "hello"}]
                   "" 80)]
-      (is (= ["You: hi" "hello"] lines))))
+      (is (= 4 (count lines)))
+      (is (clojure.string/includes? (second lines) "hi"))
+      (is (clojure.string/starts-with? (last lines) "◆ "))))
 
   (testing "with current-text appended as streaming"
     (let [lines (view/rebuild-chat-lines [{:type :user :text "hi"}] "typing..." 80)]
-      (is (= ["You: hi" "typing..."] lines))))
+      (is (= 4 (count lines)))
+      (is (clojure.string/starts-with? (last lines) "◆ "))))
 
   (testing "empty current-text not appended"
     (let [lines (view/rebuild-chat-lines [{:type :user :text "hi"}] "" 80)]
-      (is (= 1 (count lines))))))
+      (is (= 3 (count lines))))))
 
 (deftest pad-to-height-test
   (testing "shorter than height — pads at top with empty strings"
@@ -91,7 +104,7 @@
 
 (deftest render-chat-test
   (let [base-state {:chat-lines ["line1" "line2" "line3" "line4" "line5"]
-                    :height     7
+                    :height     9
                     :scroll-offset 0}]
 
     (testing "offset 0 — last N visible lines"
