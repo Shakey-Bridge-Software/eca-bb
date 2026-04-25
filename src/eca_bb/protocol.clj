@@ -121,3 +121,9 @@
 (defn stop-prompt! [srv chat-id]
   (send-notification! srv "chat/promptStop"
                       (prompt-stop-params chat-id)))
+
+(defn selected-model-changed! [srv model]
+  (send-notification! srv "chat/selectedModelChanged" {:model model}))
+
+(defn selected-agent-changed! [srv agent]
+  (send-notification! srv "chat/selectedAgentChanged" {:agent agent}))

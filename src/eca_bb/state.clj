@@ -1,6 +1,7 @@
 (ns eca-bb.state
   (:require [clojure.string :as str]
             [charm.program :as program]
+            [charm.components.list :as cl]
             [charm.components.text-input :as ti]
             [charm.message :as msg]
             [eca-bb.server :as server]
@@ -248,12 +249,14 @@
     "config/updated"
     (let [chat (get-in notification [:params :chat])
           s'   (cond-> state
-                 (:models chat)                (assoc :available-models (:models chat))
-                 (:agents chat)                (assoc :available-agents (:agents chat))
-                 (contains? chat :selectModel) (assoc :selected-model (:selectModel chat))
-                 (contains? chat :selectAgent) (assoc :selected-agent (:selectAgent chat))
-                 (:welcomeMessage chat)        (update :items conj {:type :assistant-text
-                                                                     :text (:welcomeMessage chat)}))]
+                 (:models chat)                  (assoc :available-models (:models chat))
+                 (:agents chat)                  (assoc :available-agents (:agents chat))
+                 (contains? chat :selectModel)   (assoc :selected-model (:selectModel chat))
+                 (contains? chat :selectAgent)   (assoc :selected-agent (:selectAgent chat))
+                 (contains? chat :variants)      (assoc :available-variants (:variants chat))
+                 (contains? chat :selectVariant) (assoc :selected-variant (:selectVariant chat))
+                 (:welcomeMessage chat)          (update :items conj {:type :assistant-text
+                                                                       :text (:welcomeMessage chat)}))]
       [(if (:welcomeMessage chat) (rebuild-lines s') s') nil])
 
     [state nil]))
@@ -286,6 +289,46 @@
         :else [s cmd]))
     [state nil]
     msgs))
+
+;; --- Picker helpers ---
+
+(defn- open-picker [state kind]
+  (let [items (if (= :model kind) (:available-models state) (:available-agents state))]
+    (if (empty? items)
+      state
+      (-> state
+          (assoc :mode :picking
+                 :picker {:kind  kind
+                          :list  (cl/item-list items :height 8)
+                          :all   items
+                          :query ""})
+          (update :input ti/reset)))))
+
+(defn- filter-picker [state ch]
+  (let [query (str (get-in state [:picker :query]) ch)
+        all   (get-in state [:picker :all])
+        items (filter #(str/includes? (str/lower-case %) (str/lower-case query)) all)]
+    (-> state
+        (assoc-in [:picker :query] query)
+        (update-in [:picker :list] cl/set-items (vec items)))))
+
+(defn- unfilter-picker [state]
+  (let [query (get-in state [:picker :query])
+        new-q (if (seq query) (subs query 0 (dec (count query))) "")
+        all   (get-in state [:picker :all])
+        items (if (seq new-q)
+                (filter #(str/includes? (str/lower-case %) (str/lower-case new-q)) all)
+                all)]
+    (-> state
+        (assoc-in [:picker :query] new-q)
+        (update-in [:picker :list] cl/set-items (vec items)))))
+
+(defn- printable-char? [msg]
+  (and (msg/key-press? msg)
+       (string? (:key msg))
+       (= 1 (count (:key msg)))
+       (not (:ctrl msg))
+       (not (:alt msg))))
 
 ;; --- Init ---
 
@@ -399,11 +442,24 @@
           (and (msg/key-press? msg) (msg/key-match? msg "ctrl+c")))
       [state (shutdown-cmd (:server state))]
 
+      ;; Ctrl+L: open model picker
+      (and (msg/key-press? msg)
+           (msg/key-match? msg "ctrl+l")
+           (= :ready (:mode state)))
+      [(open-picker state :model) nil]
+
       (and (msg/key-press? msg)
            (msg/key-match? msg :enter)
            (= :ready (:mode state)))
       (let [text (str/trim (ti/value (:input state)))]
-        (if (seq text)
+        (cond
+          (and (= "/model" text) (seq (:available-models state)))
+          [(open-picker state :model) nil]
+
+          (and (= "/agent" text) (seq (:available-agents state)))
+          [(open-picker state :agent) nil]
+
+          (seq text)
           (let [new-state (-> state
                               (update :items conj {:type :user :text text})
                               (assoc :mode :chatting :pending-message text)
@@ -411,7 +467,8 @@
                               rebuild-lines)]
             (send-chat-prompt! (:server state) (:chat-id state) text (effective-opts state))
             [new-state nil])
-          [state nil]))
+
+          :else [state nil]))
 
       (and (msg/key-press? msg)
            (msg/key-match? msg :escape)
@@ -494,6 +551,52 @@
       (let [{:keys [chat-id tool-call-id]} (:pending-approval state)]
         (protocol/reject-tool! (:server state) chat-id tool-call-id)
         [(assoc state :mode :chatting :pending-approval nil) nil])
+
+      ;; Picker: Enter to select
+      (and (msg/key-press? msg)
+           (msg/key-match? msg :enter)
+           (= :picking (:mode state)))
+      (let [{:keys [kind list]} (:picker state)
+            selected (cl/selected-item list)]
+        (if selected
+          (do
+            (if (= :model kind)
+              (protocol/selected-model-changed! (:server state) selected)
+              (protocol/selected-agent-changed! (:server state) selected))
+            [(-> state
+                 (assoc :mode :ready)
+                 (assoc (if (= :model kind) :selected-model :selected-agent) selected)
+                 (cond-> (= :model kind) (assoc :selected-variant nil))
+                 (dissoc :picker)
+                 (update :input ti/focus))
+             nil])
+          [state nil]))
+
+      ;; Picker: Escape to cancel
+      (and (msg/key-press? msg)
+           (msg/key-match? msg :escape)
+           (= :picking (:mode state)))
+      [(-> state
+           (assoc :mode :ready)
+           (dissoc :picker)
+           (update :input ti/focus))
+       nil]
+
+      ;; Picker: Backspace removes last filter char
+      (and (msg/key-press? msg)
+           (msg/key-match? msg :backspace)
+           (= :picking (:mode state)))
+      [(unfilter-picker state) nil]
+
+      ;; Picker: printable char narrows filter
+      (and (printable-char? msg)
+           (= :picking (:mode state)))
+      [(filter-picker state (:key msg)) nil]
+
+      ;; Picker: navigation keys passed to list-update
+      (= :picking (:mode state))
+      (let [[new-list _] (cl/list-update (get-in state [:picker :list]) msg)]
+        [(assoc-in state [:picker :list] new-list) nil])
 
       (and (msg/key-press? msg)
            (or (msg/key-match? msg :up) (msg/key-match? msg "k"))

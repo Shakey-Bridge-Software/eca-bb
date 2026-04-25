@@ -1,5 +1,6 @@
 (ns eca-bb.state-test
   (:require [clojure.test :refer [deftest is testing]]
+            [charm.components.list :as cl]
             [charm.components.text-input :as ti]
             [charm.message :as msg]
             [eca-bb.protocol :as protocol]
@@ -468,4 +469,144 @@
       (testing "second enter submits and returns non-nil cmd"
         (let [s1' (assoc s1 :input (ti/set-value (:input s1) "my-org"))
               [_ cmd2] (state/update-state s1' (msg/key-press :enter))]
-          (is (some? cmd2)))))))
+          (is (some? cmd2))))))
+
+;; --- Phase 2: model & agent identity ---
+
+(deftest handle-config-updated-variants-test
+  (testing "variants list stored"
+    (let [[s _] (handle-eca-notification
+                  (base-state)
+                  {:method "config/updated"
+                   :params {:chat {:variants ["low" "medium" "high"]}}})]
+      (is (= ["low" "medium" "high"] (:available-variants s)))))
+
+  (testing "selectVariant sets selected-variant"
+    (let [[s _] (handle-eca-notification
+                  (base-state)
+                  {:method "config/updated"
+                   :params {:chat {:selectVariant "medium"}}})]
+      (is (= "medium" (:selected-variant s)))))
+
+  (testing "selectVariant null clears selected-variant"
+    (let [s0    (assoc (base-state) :selected-variant "high")
+          [s _] (handle-eca-notification
+                  s0
+                  {:method "config/updated"
+                   :params {:chat {:selectVariant nil}}})]
+      (is (nil? (:selected-variant s)))))
+
+  (testing "absent variants field does not overwrite existing"
+    (let [s0    (assoc (base-state) :available-variants ["low" "high"])
+          [s _] (handle-eca-notification
+                  s0
+                  {:method "config/updated"
+                   :params {:chat {:models ["anthropic/claude-opus-4-7"]}}})]
+      (is (= ["low" "high"] (:available-variants s))))))
+
+(deftest ctrl-l-opens-model-picker-test
+  (testing "Ctrl+L in :ready enters :picking with kind :model"
+    (let [s0 (assoc (base-state)
+                    :mode :ready
+                    :available-models ["anthropic/claude-opus-4-7"
+                                       "anthropic/claude-sonnet-4-6"])
+          [s _] (state/update-state s0 (msg/key-press "l" :ctrl true))]
+      (is (= :picking (:mode s)))
+      (is (= :model (get-in s [:picker :kind])))
+      (is (= 2 (cl/item-count (get-in s [:picker :list]))))
+      (is (= "" (get-in s [:picker :query])))))
+
+  (testing "Ctrl+L in :chatting is a no-op"
+    (let [s0    (assoc (base-state) :mode :chatting)
+          [s _] (state/update-state s0 (msg/key-press "l" :ctrl true))]
+      (is (= :chatting (:mode s)))
+      (is (nil? (:picker s)))))
+
+  (testing "Ctrl+L with empty available-models is a no-op"
+    (let [s0    (assoc (base-state) :mode :ready :available-models [])
+          [s _] (state/update-state s0 (msg/key-press "l" :ctrl true))]
+      (is (= :ready (:mode s))))))
+
+(deftest slash-model-opens-picker-test
+  (testing "/model as input + Enter opens model picker"
+    (let [s0 (-> (base-state)
+                 (assoc :mode :ready
+                        :available-models ["anthropic/claude-opus-4-7"])
+                 (assoc :input (ti/set-value (ti/text-input) "/model")))
+          [s _] (state/update-state s0 (msg/key-press :enter))]
+      (is (= :picking (:mode s)))
+      (is (= :model (get-in s [:picker :kind])))))
+
+  (testing "/agent as input + Enter opens agent picker"
+    (let [s0 (-> (base-state)
+                 (assoc :mode :ready
+                        :available-agents ["code" "plan"])
+                 (assoc :input (ti/set-value (ti/text-input) "/agent")))
+          [s _] (state/update-state s0 (msg/key-press :enter))]
+      (is (= :picking (:mode s)))
+      (is (= :agent (get-in s [:picker :kind]))))))
+
+(deftest picker-filter-test
+  (testing "typing narrows list by case-insensitive substring"
+    ;; "opus-small" and "cohere-cmd" both contain 'o'; "llama-3" does not
+    ;; Only "opus-small" contains "op"
+    (let [s0 (assoc (base-state)
+                    :mode :ready
+                    :available-models ["opus-small" "cohere-cmd" "llama-3"])
+          [s0-pick _] (state/update-state s0 (msg/key-press "l" :ctrl true))
+          [s1 _]      (state/update-state s0-pick (msg/key-press "o"))
+          [s2 _]      (state/update-state s1 (msg/key-press "p"))]
+      (is (= "o" (get-in s1 [:picker :query])))
+      (is (= 2 (cl/item-count (get-in s1 [:picker :list]))))
+      (is (= "op" (get-in s2 [:picker :query])))
+      (is (= 1 (cl/item-count (get-in s2 [:picker :list]))))))
+
+  (testing "backspace removes last filter char"
+    (let [s0      (assoc (base-state)
+                         :mode :ready
+                         :available-models ["opus-small" "cohere-cmd"])
+          [s-pick _] (state/update-state s0 (msg/key-press "l" :ctrl true))
+          [s1 _]     (state/update-state s-pick (msg/key-press "o"))
+          [s2 _]     (state/update-state s1 (msg/key-press "p"))
+          [s3 _]     (state/update-state s2 (msg/key-press :backspace))]
+      (is (= "o" (get-in s3 [:picker :query])))
+      (is (= 2 (cl/item-count (get-in s3 [:picker :list])))))))
+
+(deftest picker-enter-selects-model-test
+  (testing "Enter in :picking :model updates selected-model, clears variant, returns :ready"
+    (with-redefs [protocol/selected-model-changed! (fn [& _] nil)]
+      (let [s0 (assoc (base-state)
+                      :mode :ready
+                      :selected-variant "medium"
+                      :available-models ["anthropic/claude-opus-4-7"
+                                         "anthropic/claude-sonnet-4-6"])
+            [s-pick _] (state/update-state s0 (msg/key-press "l" :ctrl true))
+            [s _]      (state/update-state s-pick (msg/key-press :enter))]
+        (is (= :ready (:mode s)))
+        (is (nil? (:picker s)))
+        (is (= "anthropic/claude-opus-4-7" (:selected-model s)))
+        (is (nil? (:selected-variant s)))))))
+
+(deftest picker-enter-selects-agent-test
+  (testing "Enter in :picking :agent updates selected-agent, returns :ready"
+    (with-redefs [protocol/selected-agent-changed! (fn [& _] nil)]
+      (let [s0 (-> (base-state)
+                   (assoc :mode :ready :available-agents ["code" "plan"])
+                   (assoc :input (ti/set-value (ti/text-input) "/agent")))
+            [s-pick _] (state/update-state s0 (msg/key-press :enter))
+            [s _]      (state/update-state s-pick (msg/key-press :enter))]
+        (is (= :ready (:mode s)))
+        (is (= "code" (:selected-agent s)))))))
+
+(deftest picker-escape-cancels-test
+  (testing "Escape in :picking returns to :ready, selection unchanged"
+    (let [s0 (assoc (base-state)
+                    :mode :ready
+                    :selected-model "anthropic/claude-sonnet-4-6"
+                    :available-models ["anthropic/claude-opus-4-7"
+                                       "anthropic/claude-sonnet-4-6"])
+          [s-pick _] (state/update-state s0 (msg/key-press "l" :ctrl true))
+          [s _]      (state/update-state s-pick (msg/key-press :escape))]
+      (is (= :ready (:mode s)))
+      (is (nil? (:picker s)))
+      (is (= "anthropic/claude-sonnet-4-6" (:selected-model s)))))))

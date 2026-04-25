@@ -1,5 +1,6 @@
 (ns eca-bb.view
   (:require [clojure.string :as str]
+            [charm.components.list :as cl]
             [charm.components.text-input :as ti]))
 
 (defn divider [width]
@@ -59,11 +60,20 @@
           summary (or (:summary tool) (:name tool) "tool call")]
       (str "🚧 " summary "\n[y] approve  [Y] always  [n] reject"))))
 
+(defn- render-picker [state]
+  (let [{:keys [kind query list]} (:picker state)
+        label (if (= kind :model) "model" "agent")]
+    (str "Select " label " (type to filter): " query "\n"
+         (divider (:width state)) "\n"
+         (cl/list-view list))))
+
 (defn render-status-bar [state]
   (let [workspace (-> (get-in state [:opts :workspace] ".")
                       java.io.File.
                       .getName)
         model     (or (:selected-model state) (:model state) "…")
+        agent     (:selected-agent state)
+        variant   (:selected-variant state)
         usage     (:usage state)
         tokens    (some-> usage :sessionTokens (str "tok"))
         cost      (some-> usage :sessionCost)
@@ -72,7 +82,7 @@
                       (str (int (* 100 (/ (:sessionTokens usage) (:context l)))) "%")))
         loading   (when (some #(not (:done? %)) (vals (:init-tasks state))) "⏳")
         trust     (if (:trust state) "TRUST" "SAFE")]
-    (str/join "  " (remove nil? [workspace loading model tokens cost ctx-pct trust]))))
+    (str/join "  " (remove nil? [workspace loading model agent variant tokens cost ctx-pct trust]))))
 
 (defn render-login [state]
   (let [{:keys [provider action field-idx]} (:login state)
@@ -111,6 +121,9 @@
         input-area (cond
                      (= :approving mode)
                      (or (render-approval state) "")
+
+                     (= :picking mode)
+                     (render-picker state)
 
                      (= :login mode)
                      (let [action-type  (get-in state [:login :action :action])

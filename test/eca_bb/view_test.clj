@@ -158,7 +158,20 @@
 
     (testing "trust mode shows TRUST"
       (let [bar (render-status-bar (assoc base :trust true))]
-        (is (clojure.string/includes? bar "TRUST"))))))
+        (is (clojure.string/includes? bar "TRUST"))))
+
+    (testing "selected-agent shown when non-nil"
+      (let [bar (render-status-bar (assoc base :selected-agent "plan"))]
+        (is (clojure.string/includes? bar "plan"))))
+
+    (testing "selected-variant shown when non-nil"
+      (let [bar (render-status-bar (assoc base :selected-variant "medium"))]
+        (is (clojure.string/includes? bar "medium"))))
+
+    (testing "no agent or variant when nil"
+      (let [bar (render-status-bar base)]
+        (is (not (clojure.string/includes? bar "plan")))
+        (is (not (clojure.string/includes? bar "medium")))))))
 
 ;; --- Login render ---
 
