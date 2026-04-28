@@ -5,10 +5,12 @@
            [java.util.concurrent LinkedBlockingQueue TimeUnit]))
 
 (defn find-eca-binary
-  "Finds the ECA binary. Checks PATH first, then known plugin cache locations."
+  "Finds the ECA binary. Preference: eca-bb managed, PATH, editor plugin caches."
   []
   (let [home (System/getProperty "user.home")]
-    (or (some-> (proc/process ["which" "eca"] {:err :string :out :string})
+    (or (let [p (str home "/.cache/eca/eca-bb/eca")]
+          (when (.exists (java.io.File. p)) p))
+        (some-> (proc/process ["which" "eca"] {:err :string :out :string})
                 deref :out clojure.string/trim
                 not-empty)
         (some (fn [path]

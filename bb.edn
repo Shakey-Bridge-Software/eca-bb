@@ -1,23 +1,30 @@
-{:paths ["src" "test"]
- :deps {de.timokramer/charm.clj {:mvn/version "0.2.69"}}
- :tasks {run   {:doc "Run eca-bb"
-                :requires ([eca-bb.core])
-                :task (apply eca-bb.core/-main *command-line-args*)}
-         nrepl {:doc "Start nREPL for development"
-                :task (exec 'nrepl.cmdline/-main {:args ["--port" "7888"]})}
-         test  {:doc "Run unit tests"
-                :task (do (require '[clojure.test])
-                          (require '[eca-bb.protocol-test])
-                          (require '[eca-bb.view-test])
-                          (require '[eca-bb.state-test])
-                          (let [{:keys [fail error]}
-                                (clojure.test/run-tests 'eca-bb.protocol-test
-                                                        'eca-bb.view-test
-                                                        'eca-bb.state-test)]
-                            (System/exit (if (pos? (+ fail error)) 1 0))))}
-         itest {:doc "Run integration tests (requires tmux + ECA on PATH)"
-                :task (do (require '[clojure.test])
-                          (require '[eca-bb.integration-test])
-                          (let [{:keys [fail error]}
-                                (clojure.test/run-tests 'eca-bb.integration-test)]
-                            (System/exit (if (pos? (+ fail error)) 1 0))))}}}
+{:paths ["src" "test" "charm"]
+ :deps {de.timokramer/charm.clj {:mvn/version "0.2.71"}}
+ :tasks {run         {:doc "Run eca-bb"
+                      :requires ([eca-bb.core])
+                      :task (apply eca-bb.core/-main *command-line-args*)}
+         nrepl       {:doc "Start nREPL for development"
+                      :task (exec 'nrepl.cmdline/-main {:args ["--port" "7888"]})}
+         upgrade-eca {:doc "Download and install the pinned ECA binary"
+                      :requires ([eca-bb.upgrade])
+                      :task (eca-bb.upgrade/run!)}
+         test        {:doc "Run unit tests"
+                      :task (do (require '[clojure.test])
+                                (require '[eca-bb.protocol-test])
+                                (require '[eca-bb.view-test])
+                                (require '[eca-bb.state-test])
+                                (require '[eca-bb.sessions-test])
+                                (require '[eca-bb.upgrade-test])
+                                (let [{:keys [fail error]}
+                                      (clojure.test/run-tests 'eca-bb.protocol-test
+                                                              'eca-bb.view-test
+                                                              'eca-bb.state-test
+                                                              'eca-bb.sessions-test
+                                                              'eca-bb.upgrade-test)]
+                                  (System/exit (if (pos? (+ fail error)) 1 0))))}
+         itest       {:doc "Run integration tests (requires tmux + ECA on PATH)"
+                      :task (do (require '[clojure.test])
+                                (require '[eca-bb.integration-test])
+                                (let [{:keys [fail error]}
+                                      (clojure.test/run-tests 'eca-bb.integration-test)]
+                                  (System/exit (if (pos? (+ fail error)) 1 0))))}}}

@@ -127,3 +127,12 @@
 
 (defn selected-agent-changed! [srv agent]
   (send-notification! srv "chat/selectedAgentChanged" {:agent agent}))
+
+(defn list-chats! [srv callback]
+  (send-request! srv "chat/list" {:limit 20} callback))
+
+(defn open-chat! [srv chat-id callback]
+  (send-request! srv "chat/open" {:chatId chat-id} callback))
+
+(defn delete-chat! [srv chat-id callback]
+  (send-request! srv "chat/delete" {:chatId chat-id} callback))
