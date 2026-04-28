@@ -10,6 +10,7 @@
 (def ^:private session "eca-bb-itest")
 
 (defn- new-session! [cmd]
+  (sh "mkdir" "-p" "/tmp/eca-bb-itest")
   (sh "tmux" "kill-session" "-t" session)
   (Thread/sleep 200)
   (let [r (sh "tmux" "new-session" "-d" "-s" session "-x" "200" "-y" "50")]
@@ -48,23 +49,49 @@
 (defn- has [text] #(str/includes? % text))
 (defn- lacks [text] #(not (str/includes? % text)))
 
+(defn- wait-for-ready!
+  "Wait for app to be in :ready mode — detected by the prompt '>' appearing on its own
+   line between two dividers. tmux trims trailing spaces so '> ' becomes '>', which sits
+   between \\n (divider) and \\n (next divider). Sleeps briefly first to let any
+   in-progress transition away from :ready complete."
+  ([] (wait-for-ready! 60000))
+  ([timeout-ms]
+   (Thread/sleep 300)
+   (wait-for! #(str/includes? % "\n>\n") timeout-ms)))
+
 ;; ---------------------------------------------------------------------------
 ;; Shared startup
 ;; ---------------------------------------------------------------------------
 
-(defn- start! [cmd]
+(def ^:private itest-workspace "/tmp/eca-bb-itest")
+(def ^:private itest-cmd (str "bb run --workspace " itest-workspace))
+
+(def ^:private sessions-file
+  (str (System/getProperty "user.home") "/.cache/eca/eca-bb-sessions.edn"))
+
+(defn- start!
+  "Start a fresh eca-bb session, clearing any persisted chat-ids first so tests
+   don't inherit stale sessions (and their accumulated token context).
+   Kills any running session BEFORE rm to avoid a race where eca-bb writes
+   sessions.edn during JVM shutdown after rm has already run."
+  [cmd]
+  (sh "tmux" "kill-session" "-t" session)
+  (Thread/sleep 500)
+  (sh "rm" "-f" sessions-file)
   (new-session! cmd)
   ;; Wait for SAFE *and* a real model name (provider/model format), which
   ;; signals config/updated has arrived and available-models is populated.
+  ;; Use a generous 60s timeout — eca-bb startup + ECA init can be slow.
   (wait-for! #(and (str/includes? % "SAFE")
-                   (re-find #"\w+/\w+" %))))
+                   (re-find #"\w+/\w+" %))
+             60000))
 
 ;; ---------------------------------------------------------------------------
 ;; Phase 1a — baseline (implicit pre-condition for all other tests)
 ;; ---------------------------------------------------------------------------
 
 (deftest phase1a-startup-test
-  (start! "bb run")
+  (start! itest-cmd)
   (try
     (testing "app starts, connects to ECA, reaches :ready"
       (is (str/includes? (screen) "SAFE")))
@@ -75,7 +102,7 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest phase1a-init-spinner-test
-  (new-session! "bb run")
+  (new-session! itest-cmd)
   (try
     (testing "11: ⏳ spinner visible before config/updated arrives"
       (let [s (wait-for! (has "⏳") 10000)]
@@ -86,14 +113,14 @@
     (finally (kill!))))
 
 (deftest phase1a-model-in-status-bar-test
-  (start! "bb run")
+  (start! itest-cmd)
   (try
     (testing "13: model from config/updated shown in status bar"
       (is (re-find #"\w+/\w+" (screen))))
     (finally (kill!))))
 
 (deftest phase1a-escape-chatting-test
-  (start! "bb run")
+  (start! itest-cmd)
   (try
     (testing "14: Escape during :chatting returns to :ready"
       (keys! "Hello" "Enter")
@@ -104,7 +131,7 @@
     (finally (kill!))))
 
 (deftest phase1a-no-echo-test
-  (start! "bb run")
+  (start! itest-cmd)
   (try
     (testing "user message not echoed as AI output after response completes"
       (let [msg "ping-echo-xyzzy"]
@@ -120,7 +147,7 @@
     (finally (kill!))))
 
 (deftest phase1a-reader-error-test
-  (start! "bb run")
+  (start! itest-cmd)
   (try
     (testing "16: ECA process killed → disconnect message appears in chat"
       ;; Kill the eca subprocess — reader thread detects broken pipe and emits :reader-error
@@ -140,7 +167,7 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest phase2-model-picker-test
-  (start! "bb run")
+  (start! itest-cmd)
   (try
     (testing "10: Ctrl+L opens model picker"
       (keys! "C-l")
@@ -167,7 +194,7 @@
     (finally (kill!))))
 
 (deftest phase2-selected-model-in-status-bar-test
-  (start! "bb run")
+  (start! itest-cmd)
   (try
     (testing "12: model selected in picker appears in status bar"
       (keys! "C-l")
@@ -181,7 +208,7 @@
     (finally (kill!))))
 
 (deftest phase2-agent-picker-test
-  (start! "bb run")
+  (start! itest-cmd)
   (try
     (testing "14: /agent + Enter opens agent picker"
       (keys! "/agent" "Enter")
@@ -196,7 +223,7 @@
     (finally (kill!))))
 
 (deftest phase2-selected-agent-in-status-bar-test
-  (start! "bb run")
+  (start! itest-cmd)
   (try
     (testing "15: agent selected in picker appears in status bar"
       (keys! "/agent" "Enter")
@@ -209,7 +236,7 @@
     (finally (kill!))))
 
 (deftest phase2-escape-picker-test
-  (start! "bb run")
+  (start! itest-cmd)
   (try
     (testing "16: Escape from picker returns to :ready without changing selection"
       (keys! "C-l")
@@ -232,45 +259,45 @@
 ;; ---------------------------------------------------------------------------
 
 (deftest phase3-history-recalls-last-test
-  (start! "bb run")
+  (start! itest-cmd)
   (try
     (testing "up arrow in :ready recalls most recently sent message into input"
       (let [msg "hist-last-xyzzy-001"]
         (keys! msg "Enter")
-        (wait-for! (has "SAFE") 30000)
+        (wait-for-ready!)
         (keys! "Up" "Enter")
-        (let [s (wait-for! (has "SAFE") 30000)]
+        (let [s (wait-for-ready!)]
           (is (<= 2 (count (re-seq (re-pattern (java.util.regex.Pattern/quote msg)) s)))))))
     (finally (kill!))))
 
 (deftest phase3-history-multi-navigate-test
-  (start! "bb run")
+  (start! itest-cmd)
   (try
     (testing "up+up reaches second-to-last message"
       (keys! "hist-alpha-xyzzy" "Enter")
-      (wait-for! (has "SAFE") 30000)
+      (wait-for-ready!)
       (keys! "hist-beta-xyzzy" "Enter")
-      (wait-for! (has "SAFE") 30000)
+      (wait-for-ready!)
       (keys! "Up" "Up" "Enter")
-      (let [s (wait-for! (has "SAFE") 30000)]
+      (let [s (wait-for-ready!)]
         (is (<= 2 (count (re-seq #"hist-alpha-xyzzy" s))))
         (is (<= 1 (count (re-seq #"hist-beta-xyzzy" s))))))
     (finally (kill!))))
 
 (deftest phase3-history-down-clears-test
-  (start! "bb run")
+  (start! itest-cmd)
   (try
     (testing "down after up clears input back to empty"
       (keys! "hist-base-xyzzy" "Enter")
-      (wait-for! (has "SAFE") 30000)
+      (wait-for-ready!)
       (keys! "Up" "Down" "hist-fresh-xyzzy" "Enter")
-      (let [s (wait-for! (has "SAFE") 30000)]
+      (let [s (wait-for-ready!)]
         (is (str/includes? s "hist-fresh-xyzzy"))
         (is (not (str/includes? s "hist-base-xyzzyhist-fresh-xyzzy")))))
     (finally (kill!))))
 
 (deftest phase3-scroll-pgup-pgdn-test
-  (start! "bb run")
+  (start! itest-cmd)
   (try
     (testing "PgUp and PgDn scroll within the viewport without breaking the app"
       (keys! "scroll-test-ping" "Enter")
@@ -279,5 +306,65 @@
       (Thread/sleep 300)
       (keys! "NPage")
       (let [s (wait-for! (has "SAFE") 3000)]
+        (is (str/includes? s "SAFE"))))
+    (finally (kill!))))
+
+;; ---------------------------------------------------------------------------
+;; Phase 3 — session continuity
+;; ---------------------------------------------------------------------------
+
+(deftest phase3-resume-test
+  ;; Startup is always a fresh session. /sessions is the explicit resume path.
+  ;; Sends a message (persists chat-id), kills, restarts — verifies the new session
+  ;; is clean, then resumes the old chat via /sessions and checks messages replay.
+  (start! itest-cmd)
+  (try
+    (keys! "resume-seed-xyzzy" "Enter")
+    (wait-for-ready!)
+    (kill!)
+    (Thread/sleep 500)
+    ;; Restart WITHOUT clearing sessions — preserves the persisted chat-id for /sessions
+    (new-session! itest-cmd)
+    (wait-for! #(and (str/includes? % "SAFE") (re-find #"\w+/\w+" %)) 60000)
+    (testing "fresh restart shows no old messages"
+      (is (not (str/includes? (screen) "resume-seed-xyzzy"))))
+    (testing "previous chat appears in /sessions"
+      (keys! "/sessions" "Enter")
+      (wait-for! (has "Select chat") 15000))
+    (testing "selecting session replays old messages"
+      (keys! "Enter")
+      (let [s (wait-for! (has "resume-seed-xyzzy") 15000)]
+        (is (str/includes? s "resume-seed-xyzzy"))))
+    (finally (kill!))))
+
+(deftest phase3-new-command-test
+  (start! itest-cmd)
+  (try
+    (let [old-msg "new-cmd-before-xyzzy"
+          new-msg "new-cmd-after-xyzzy"]
+      (keys! old-msg "Enter")
+      (wait-for-ready!)
+      (keys! "/new" "Enter")
+      (Thread/sleep 500)
+      (testing "/new clears old message from UI"
+        (is (not (str/includes? (screen) old-msg))))
+      (keys! new-msg "Enter")
+      (let [s (wait-for-ready!)]
+        (testing "new message works after /new"
+          (is (str/includes? s new-msg)))))
+    (finally (kill!))))
+
+(deftest phase3-sessions-picker-test
+  (start! itest-cmd)
+  (try
+    (keys! "sessions-seed-xyzzy" "Enter")
+    (wait-for-ready!)
+    (testing "/sessions opens session picker"
+      (keys! "/sessions" "Enter")
+      (let [s (wait-for! (has "Select chat") 15000)]
+        (is (str/includes? s "Select chat"))))
+    (testing "Escape from sessions picker returns to :ready"
+      (keys! "Escape")
+      (let [s (wait-for! (lacks "Select chat") 5000)]
         (is (str/includes? s "SAFE"))))
     (finally (kill!))))
