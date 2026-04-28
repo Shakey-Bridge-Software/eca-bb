@@ -14,7 +14,7 @@ Read [assessment.md](assessment.md) for the philosophical grounding behind this 
 | [1b](#phase-1b-login-hardening) | Login Hardening | End-to-end auth with real credentials | [detail](roadmap/phase-1b-login-hardening.md) |
 | [2](#phase-2-model--agent-identity) | Model & Agent Identity | Know what you're running, change it | [detail](roadmap/phase-2-model-agent-identity.md) |
 | [3](#phase-3-session-continuity) | Session Continuity | Quit and resume, start fresh | [detail](roadmap/phase-3-session-continuity.md) |
-| [4](#phase-4-command-system) | Command System | Slash commands as the extensibility seam | — |
+| [4](#phase-4-command-system) | Command System | Slash commands as the extensibility seam | [detail](roadmap/phase-4-command-system.md) |
 | [5](#phase-5-message-steering) | Message Steering | Influence a running prompt | — |
 | [6](#phase-6-rich-interaction) | Rich Interaction | Server-initiated Q&A | — |
 | [7](#phase-7-power-features) | Power Features | Context injection, jobs, rollback/fork | — |

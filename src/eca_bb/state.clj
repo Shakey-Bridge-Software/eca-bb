@@ -346,7 +346,10 @@
 ;; --- Picker helpers ---
 
 (defn- item-display [kind item]
-  (if (= :session kind) (first item) item))
+  (case kind
+    :session (first item)
+    :command (str (first item) "  —  " (second item))
+    item))
 
 (defn- open-picker [state kind]
   (let [items (if (= :model kind) (:available-models state) (:available-agents state))]
@@ -400,6 +403,93 @@
         (assoc-in [:picker :query] new-q)
         (assoc-in [:picker :filtered] filtered)
         (update-in [:picker :list] cl/set-items labels))))
+
+(declare command-registry)
+
+;; --- Command handlers ---
+
+(defn- cmd-open-model-picker [state]
+  (if (seq (:available-models state))
+    [(open-picker state :model) nil]
+    [(-> state
+         (update :items conj {:type :system :text "⚠ No models available"})
+         rebuild-lines)
+     nil]))
+
+(defn- cmd-open-agent-picker [state]
+  (if (seq (:available-agents state))
+    [(open-picker state :agent) nil]
+    [(-> state
+         (update :items conj {:type :system :text "⚠ No agents available"})
+         rebuild-lines)
+     nil]))
+
+(defn- cmd-new-chat [state]
+  (if-let [old-chat-id (:chat-id state)]
+    (do
+      (sessions/save-chat-id! (get-in state [:opts :workspace]) nil)
+      [(-> state
+           (assoc :items [] :chat-lines [] :chat-id nil :chat-title nil :scroll-offset 0)
+           (update :input #(-> % ti/reset ti/focus)))
+       (delete-chat-cmd (:server state) old-chat-id)])
+    [(update state :input #(-> % ti/reset ti/focus)) nil]))
+
+(defn- cmd-list-sessions [state]
+  [(update state :input ti/reset) (list-chats-cmd (:server state))])
+
+(defn- cmd-clear-chat [state]
+  [(assoc state :items [] :chat-lines [] :scroll-offset 0) nil])
+
+(defn- cmd-show-help [state]
+  (let [lines (map (fn [[name {:keys [doc]}]] (str name "  —  " doc))
+                   (sort-by key command-registry))
+        text  (str/join "\n" (into ["Available commands:"] lines))]
+    [(update state :items conj {:type :system :text text}) nil]))
+
+(defn- cmd-quit [state]
+  [state (shutdown-cmd (:server state))])
+
+(defn- cmd-login [state]
+  [state (start-login-cmd (:server state) nil)])
+
+(def command-registry
+  {"/model"    {:doc "Open model picker"                  :handler cmd-open-model-picker}
+   "/agent"    {:doc "Open agent picker"                  :handler cmd-open-agent-picker}
+   "/new"      {:doc "Start a fresh chat"                 :handler cmd-new-chat}
+   "/sessions" {:doc "Browse and resume previous chats"   :handler cmd-list-sessions}
+   "/clear"    {:doc "Clear chat display (local only)"    :handler cmd-clear-chat}
+   "/help"     {:doc "Show available commands"            :handler cmd-show-help}
+   "/quit"     {:doc "Exit eca-bb"                        :handler cmd-quit}
+   "/login"    {:doc "Manually trigger provider login"    :handler cmd-login}})
+
+(defn- open-command-picker [state]
+  (let [all (mapv (fn [[name {:keys [doc]}]] [name doc])
+                  (sort-by key command-registry))]
+    (-> state
+        (assoc :mode :picking
+               :picker {:kind     :command
+                        :query    ""
+                        :list     (cl/item-list (mapv #(item-display :command %) all) :height 8)
+                        :all      all
+                        :filtered all})
+        (update :input ti/reset))))
+
+(defn- finalize-handler-result [new-state cmd]
+  [(cond-> (rebuild-lines new-state)
+     (= :ready (:mode new-state)) (update :input #(-> % ti/reset ti/focus)))
+   cmd])
+
+(defn- dispatch-command [state text]
+  (if-let [{:keys [handler]} (get command-registry text)]
+    (let [[new-state cmd] (handler state)]
+      (finalize-handler-result new-state cmd))
+    [(-> state
+         (update :items conj {:type :system
+                               :text (str "⚠ Unknown command: " text
+                                          "  (type /help to see available commands)")})
+         (update :input #(-> % ti/reset ti/focus))
+         rebuild-lines)
+     nil]))
 
 (defn- printable-char? [msg]
   (and (msg/key-press? msg)
@@ -543,36 +633,19 @@
           (and (msg/key-press? msg) (msg/key-match? msg "ctrl+c")))
       [state (shutdown-cmd (:server state))]
 
-      ;; Ctrl+L: open model picker
+      ;; Ctrl+L: open model picker (same guard as /model command)
       (and (msg/key-press? msg)
            (msg/key-match? msg "ctrl+l")
            (= :ready (:mode state)))
-      [(open-picker state :model) nil]
+      (cmd-open-model-picker state)
 
       (and (msg/key-press? msg)
            (msg/key-match? msg :enter)
            (= :ready (:mode state)))
       (let [text (str/trim (ti/value (:input state)))]
         (cond
-          (and (= "/model" text) (seq (:available-models state)))
-          [(open-picker state :model) nil]
-
-          (and (= "/agent" text) (seq (:available-agents state)))
-          [(open-picker state :agent) nil]
-
-          (= "/new" text)
-          (if-let [old-chat-id (:chat-id state)]
-            (do
-              (sessions/save-chat-id! (get-in state [:opts :workspace]) nil)
-              [(-> state
-                   (assoc :items [] :chat-lines [] :chat-id nil :chat-title nil :scroll-offset 0)
-                   (update :input #(-> % ti/reset ti/focus)))
-               (delete-chat-cmd (:server state) old-chat-id)])
-            [(update state :input #(-> % ti/reset ti/focus)) nil])
-
-          (= "/sessions" text)
-          [(update state :input ti/reset)
-           (list-chats-cmd (:server state))]
+          (str/starts-with? text "/")
+          (dispatch-command state text)
 
           (seq text)
           (let [new-state (-> state
@@ -706,7 +779,17 @@
                  (assoc :chat-id (or chat-id (:chat-id state)))
                  (dissoc :picker)
                  (update :input ti/focus))
-             (when chat-id (open-chat-cmd (:server state) chat-id))])))
+             (when chat-id (open-chat-cmd (:server state) chat-id))])
+
+          :command
+          (let [idx           (cl/selected-index list)
+                [cmd-name _]  (when (and (some? idx) (< idx (count filtered)))
+                                (nth filtered idx))]
+            (if-let [{:keys [handler]} (when cmd-name (get command-registry cmd-name))]
+              (let [base            (-> state (dissoc :picker) (assoc :mode :ready))
+                    [new-state cmd] (handler base)]
+                (finalize-handler-result new-state cmd))
+              [state nil]))))
 
       ;; Picker: Escape to cancel
       (and (msg/key-press? msg)
@@ -719,10 +802,14 @@
        nil]
 
       ;; Picker: Backspace removes last filter char
+      ;; For the command picker, backspace on empty query exits to :ready
       (and (msg/key-press? msg)
            (msg/key-match? msg :backspace)
            (= :picking (:mode state)))
-      [(unfilter-picker state) nil]
+      (if (and (= :command (get-in state [:picker :kind]))
+               (= "" (get-in state [:picker :query])))
+        [(-> state (assoc :mode :ready) (dissoc :picker) (update :input ti/focus)) nil]
+        [(unfilter-picker state) nil])
 
       ;; Picker: printable char narrows filter
       (and (printable-char? msg)
@@ -789,6 +876,13 @@
       (and (msg/wheel-down? msg)
            (not (#{:approving :picking} (:mode state))))
       [(update state :scroll-offset #(max 0 (- % 3))) nil]
+
+      ;; Autocomplete: "/" as first char in empty :ready input opens command picker
+      (and (printable-char? msg)
+           (= "/" (:key msg))
+           (= :ready (:mode state))
+           (= "" (str/trim (ti/value (:input state)))))
+      [(open-command-picker state) nil]
 
       :else
       (let [[new-input cmd] (ti/text-input-update (:input state) msg)]

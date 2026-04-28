@@ -368,3 +368,80 @@
       (let [s (wait-for! (lacks "Select chat") 5000)]
         (is (str/includes? s "SAFE"))))
     (finally (kill!))))
+
+;; ---------------------------------------------------------------------------
+;; Phase 4 — command system
+;; ---------------------------------------------------------------------------
+
+(deftest phase4-command-picker-opens-test
+  (start! itest-cmd)
+  (try
+    (testing "typing '/' opens command picker"
+      (keys! "/")
+      (let [s (wait-for! (has "Select command") 3000)]
+        (is (str/includes? s "Select command"))))
+    (testing "typing 'm' filters list — model visible, quit not visible"
+      (keys! "m")
+      (Thread/sleep 200)
+      (is (str/includes? (screen) "model"))
+      (is (not (str/includes? (screen) "/quit"))))
+    (testing "Escape closes picker, returns to SAFE"
+      (keys! "Escape")
+      (let [s (wait-for! (lacks "Select command") 3000)]
+        (is (str/includes? s "SAFE"))))
+    (finally (kill!))))
+
+(deftest phase4-backspace-exits-picker-test
+  (start! itest-cmd)
+  (try
+    (testing "Backspace on empty query in command picker returns to :ready"
+      (keys! "/")
+      (wait-for! (has "Select command") 3000)
+      (keys! "BSpace")
+      (let [s (wait-for! (lacks "Select command") 3000)]
+        (is (str/includes? s "SAFE"))))
+    (finally (kill!))))
+
+(deftest phase4-clear-command-test
+  (start! itest-cmd)
+  (try
+    (testing "/clear removes previous chat content from display"
+      (keys! "hello-clear-xyzzy" "Enter")
+      (wait-for-ready!)
+      (keys! "/clear" "Enter")
+      (Thread/sleep 300)
+      (is (not (str/includes? (screen) "hello-clear-xyzzy"))))
+    (finally (kill!))))
+
+(deftest phase4-help-command-test
+  (start! itest-cmd)
+  (try
+    (testing "/help shows command listing in chat"
+      (keys! "/help" "Enter")
+      (Thread/sleep 300)
+      (let [s (screen)]
+        (is (str/includes? s "/model"))
+        (is (str/includes? s "/quit"))))
+    (finally (kill!))))
+
+(deftest phase4-unknown-command-test
+  (start! itest-cmd)
+  (try
+    (testing "unknown /cmd shows error containing command text"
+      (keys! "/notacommandxyzzy" "Enter")
+      (Thread/sleep 300)
+      (is (str/includes? (screen) "notacommandxyzzy")))
+    (finally (kill!))))
+
+(deftest phase4-command-picker-executes-test
+  (start! itest-cmd)
+  (try
+    (testing "selecting /new from command picker clears chat"
+      (keys! "picker-exec-seed-xyzzy" "Enter")
+      (wait-for-ready!)
+      (keys! "/")
+      (wait-for! (has "Select command") 3000)
+      (keys! "new" "Enter")
+      (Thread/sleep 500)
+      (is (not (str/includes? (screen) "picker-exec-seed-xyzzy"))))
+    (finally (kill!))))

@@ -199,6 +199,33 @@
       (let [bar (render-status-bar base)]
         (is (not (clojure.string/includes? bar "My Project")))))))
 
+;; --- Command picker render ---
+
+(deftest render-picker-command-test
+  (testing "command picker renders 'Select command' label"
+    (let [s {:mode    :picking
+             :width   80
+             :height  24
+             :opts    {:workspace "/tmp"}
+             :trust   false
+             :model   nil
+             :selected-model nil
+             :selected-agent nil
+             :selected-variant nil
+             :init-tasks {}
+             :usage   nil
+             :chat-title nil
+             :items   []
+             :chat-lines []
+             :scroll-offset 0
+             :input   (ti/text-input)
+             :picker  {:kind    :command
+                       :query   "m"
+                       :list    (charm.components.list/item-list
+                                  ["/model  —  Open model picker"] :height 8)}}
+          rendered (view/view s)]
+      (is (clojure.string/includes? rendered "Select command")))))
+
 ;; --- Login render ---
 
 (deftest render-login-test

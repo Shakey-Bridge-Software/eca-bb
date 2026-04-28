@@ -533,10 +533,13 @@
       (is (= :chatting (:mode s)))
       (is (nil? (:picker s)))))
 
-  (testing "Ctrl+L with empty available-models is a no-op"
+  (testing "Ctrl+L with empty available-models shows error"
     (let [s0    (assoc (base-state) :mode :ready :available-models [])
           [s _] (state/update-state s0 (msg/key-press "l" :ctrl true))]
-      (is (= :ready (:mode s))))))
+      (is (= :ready (:mode s)))
+      (is (some #(and (= :system (:type %))
+                      (clojure.string/includes? (:text %) "No models"))
+                (:items s))))))
 
 (deftest slash-model-opens-picker-test
   (testing "/model as input + Enter opens model picker"
@@ -729,4 +732,146 @@
           [s-pick _] (state/update-state s0 {:type :chat-list-loaded :chats chats})
           [s _]      (state/update-state s-pick (msg/key-press :escape))]
       (is (= :ready (:mode s)))
-      (is (nil? (:picker s)))))))
+      (is (nil? (:picker s))))))
+
+;; ---------------------------------------------------------------------------
+;; Phase 4 — command system
+;; ---------------------------------------------------------------------------
+
+(deftest slash-opens-command-picker-test
+  (testing "typing '/' in empty :ready input enters :picking :command"
+    (let [s0 (assoc (base-state) :mode :ready)
+          [s _] (state/update-state s0 (msg/key-press "/"))]
+      (is (= :picking (:mode s)))
+      (is (= :command (get-in s [:picker :kind])))
+      (is (= "" (get-in s [:picker :query])))
+      (is (= 8 (cl/item-count (get-in s [:picker :list]))))))
+
+  (testing "typing non-'/' in :ready does not open picker"
+    (let [s0 (assoc (base-state) :mode :ready)
+          [s _] (state/update-state s0 (msg/key-press "h"))]
+      (is (= :ready (:mode s)))
+      (is (nil? (:picker s)))))
+
+  (testing "typing '/' in non-empty input does not open picker"
+    (let [s0 (-> (base-state)
+                 (assoc :mode :ready)
+                 (update :input #(ti/set-value % "hello")))
+          [s _] (state/update-state s0 (msg/key-press "/"))]
+      (is (= :ready (:mode s)))
+      (is (nil? (:picker s))))))
+
+(deftest command-picker-filter-test
+  (testing "typing narrows list; backspace on non-empty query removes char"
+    (let [s0 (assoc (base-state) :mode :ready)
+          [s-pick _] (state/update-state s0 (msg/key-press "/"))
+          total      (cl/item-count (get-in s-pick [:picker :list]))
+          [s1 _]     (state/update-state s-pick (msg/key-press "m"))]
+      (is (= "m" (get-in s1 [:picker :query])))
+      (is (< (cl/item-count (get-in s1 [:picker :list])) total))
+      (is (pos? (cl/item-count (get-in s1 [:picker :list]))))
+      (let [[s2 _] (state/update-state s1 (msg/key-press :backspace))]
+        (is (= "" (get-in s2 [:picker :query])))
+        (is (= :picking (:mode s2))))))
+
+  (testing "backspace on empty query returns to :ready"
+    (let [s0 (assoc (base-state) :mode :ready)
+          [s-pick _] (state/update-state s0 (msg/key-press "/"))
+          [s1 _]     (state/update-state s-pick (msg/key-press :backspace))]
+      (is (= :ready (:mode s1)))
+      (is (nil? (:picker s1))))))
+
+(deftest command-picker-escape-test
+  (testing "Escape returns to :ready with cleared picker"
+    (let [s0 (assoc (base-state) :mode :ready)
+          [s-pick _] (state/update-state s0 (msg/key-press "/"))
+          [s _]      (state/update-state s-pick (msg/key-press :escape))]
+      (is (= :ready (:mode s)))
+      (is (nil? (:picker s))))))
+
+(deftest slash-clear-test
+  (testing "/clear entered directly clears items and scroll"
+    (let [s0 (-> (base-state)
+                 (assoc :mode :ready
+                        :items [{:type :user :text "hi"}]
+                        :scroll-offset 5)
+                 (update :input #(ti/set-value % "/clear")))
+          [s _] (state/update-state s0 (msg/key-press :enter))]
+      (is (empty? (:items s)))
+      (is (= 0 (:scroll-offset s)))))
+
+  (testing "/clear via command picker clears items"
+    (let [s0 (-> (base-state)
+                 (assoc :mode :ready
+                        :items [{:type :user :text "hi"}]))
+          [s-pick _] (state/update-state s0 (msg/key-press "/"))
+          [s1 _]     (state/update-state s-pick (msg/key-press "c"))
+          [s2 _]     (state/update-state s1 (msg/key-press "l"))
+          [s3 _]     (state/update-state s2 (msg/key-press "e"))
+          [s4 _]     (state/update-state s3 (msg/key-press :enter))]
+      (is (= :ready (:mode s4)))
+      (is (nil? (:picker s4)))
+      (is (empty? (:items s4))))))
+
+(deftest slash-help-test
+  (testing "/help appends system item containing all command names"
+    (let [s0 (-> (base-state)
+                 (assoc :mode :ready)
+                 (update :input #(ti/set-value % "/help")))
+          [s _] (state/update-state s0 (msg/key-press :enter))
+          sys   (last (filter #(= :system (:type %)) (:items s)))]
+      (is (some? sys))
+      (doseq [cmd ["/model" "/agent" "/new" "/sessions"
+                   "/clear" "/help" "/quit" "/login"]]
+        (is (clojure.string/includes? (:text sys) cmd)
+            (str cmd " missing from /help output"))))))
+
+(deftest slash-quit-test
+  (testing "/quit returns non-nil shutdown cmd"
+    (let [s0 (-> (base-state)
+                 (assoc :mode :ready)
+                 (update :input #(ti/set-value % "/quit")))
+          [_ cmd] (state/update-state s0 (msg/key-press :enter))]
+      (is (some? cmd)))))
+
+(deftest unknown-command-test
+  (testing "unrecognised /cmd appends system error containing command text"
+    (let [s0 (-> (base-state)
+                 (assoc :mode :ready)
+                 (update :input #(ti/set-value % "/foobarxyzzy")))
+          [s _] (state/update-state s0 (msg/key-press :enter))]
+      (is (some #(and (= :system (:type %))
+                      (clojure.string/includes? (:text %) "/foobarxyzzy"))
+                (:items s))))))
+
+(deftest slash-model-via-registry-test
+  (testing "/model via direct Enter still opens model picker"
+    (let [s0 (-> (base-state)
+                 (assoc :mode :ready
+                        :available-models ["anthropic/claude-sonnet-4-6"])
+                 (update :input #(ti/set-value % "/model")))
+          [s _] (state/update-state s0 (msg/key-press :enter))]
+      (is (= :picking (:mode s)))
+      (is (= :model (get-in s [:picker :kind])))))
+
+  (testing "/model via command picker opens model picker"
+    (let [s0 (-> (base-state)
+                 (assoc :mode :ready
+                        :available-models ["anthropic/claude-sonnet-4-6"]))
+          [s-pick _] (state/update-state s0 (msg/key-press "/"))
+          ;; filter to 'mo' to isolate /model
+          [s1 _]     (state/update-state s-pick (msg/key-press "m"))
+          [s2 _]     (state/update-state s1 (msg/key-press "o"))
+          [s3 _]     (state/update-state s2 (msg/key-press :enter))]
+      (is (= :picking (:mode s3)))
+      (is (= :model (get-in s3 [:picker :kind])))))
+
+  (testing "/model with no available-models shows error (direct Enter)"
+    (let [s0 (-> (base-state)
+                 (assoc :mode :ready :available-models [])
+                 (update :input #(ti/set-value % "/model")))
+          [s _] (state/update-state s0 (msg/key-press :enter))]
+      (is (= :ready (:mode s)))
+      (is (some #(and (= :system (:type %))
+                      (clojure.string/includes? (:text %) "No models"))
+                (:items s)))))))
