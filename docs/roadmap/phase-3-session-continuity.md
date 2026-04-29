@@ -109,7 +109,7 @@ New file. Stores a map of workspace-path → chat-id in EDN:
 
 ECA sends `chat/opened` for:
 - `chat/open` hydration replay (before the `chat/contentReceived` stream)
-- `chat/fork` (Phase 7)
+- `chat/fork` (Phase 9)
 
 **`chat/opened` does NOT fire for ordinary new chats created via `chat/prompt`** — the protocol sequence diagram shows no `chat/opened` in the `chat/prompt` flow. The `chat-id` for a new chat arrives only via the `chat/prompt` response callback. As a consequence, `:chat-title` will be nil for newly started chats; it is only populated after a `/sessions` open or a fork.
 
@@ -128,7 +128,7 @@ New state field: `:chat-title nil`.
 
 ### 3. `chat/cleared` notification handler
 
-ECA sends `chat/cleared` before replaying messages via `chat/open` (and after `chat/rollback` in Phase 7). It does **not** fire in response to `chat/delete` — the client clears its own UI in the `/new` handler directly. `chat/cleared` is purely a server-initiated notification telling the client to wipe items before a replay stream.
+ECA sends `chat/cleared` before replaying messages via `chat/open` (and after `chat/rollback` in Phase 9). It does **not** fire in response to `chat/delete` — the client clears its own UI in the `/new` handler directly. `chat/cleared` is purely a server-initiated notification telling the client to wipe items before a replay stream.
 
 ```clojure
 "chat/cleared"

@@ -15,9 +15,11 @@ Read [assessment.md](assessment.md) for the philosophical grounding behind this 
 | [2](#phase-2-model--agent-identity) | Model & Agent Identity | Know what you're running, change it | [detail](roadmap/phase-2-model-agent-identity.md) |
 | [3](#phase-3-session-continuity) | Session Continuity | Quit and resume, start fresh | [detail](roadmap/phase-3-session-continuity.md) |
 | [4](#phase-4-command-system) | Command System | Slash commands as the extensibility seam | [detail](roadmap/phase-4-command-system.md) |
-| [5](#phase-5-message-steering) | Message Steering | Influence a running prompt | — |
-| [6](#phase-6-rich-interaction) | Rich Interaction | Server-initiated Q&A | — |
-| [7](#phase-7-power-features) | Power Features | Context injection, jobs, rollback/fork | — |
+| [5](#phase-5-rich-display) | Rich Display | Expandable tool blocks, thinking, sub-agent nesting | [detail](roadmap/phase-5-rich-display.md) |
+| [6](#phase-6-markdown-rendering) | Markdown Rendering | Render assistant text as formatted ANSI output | — |
+| [7](#phase-7-message-steering) | Message Steering | Influence a running prompt | — |
+| [8](#phase-8-rich-interaction) | Rich Interaction | Server-initiated Q&A | — |
+| [9](#phase-9-power-features) | Power Features | Context injection, jobs, rollback/fork | — |
 
 ---
 
@@ -152,7 +154,63 @@ Manually trigger the login flow for a provider (calls `providers/list` then logi
 
 ---
 
-## Phase 5: Message Steering
+## Phase 5: Rich Display
+
+**Goal:** Replace the flat text-only chat display with structured, interactive blocks — collapsible tool calls, thinking blocks, and nested sub-agent content — matching the UX fidelity of nvim's ECA buffer.
+
+See [roadmap/phase-5-rich-display.md](roadmap/phase-5-rich-display.md) for the full implementation plan, tests, and stopping criteria.
+
+### What to build
+
+**Extended item model.** Tool-call items gain `:args-text`, `:out-text`, `:expanded?`, and `:sub-items`. A new `:thinking` item type stores model reasoning blocks.
+
+**Collapsible rendering.** `render-item-lines` dispatches collapsed (1-line) vs. expanded (args + output block) per item type. Collapsed by default. `eca__spawn_agent` shows `▸ N steps` when it has nested sub-agent content.
+
+**Thinking blocks.** ECA's `thinking` content type is captured and displayed as `▸ Thought` (collapsed) / `▾ Thought + text` (expanded). Currently ignored.
+
+**Sub-agent nesting.** Replaces the interim `parentChatId` suppression. Sub-agent `contentReceived` is routed to the parent `eca__spawn_agent` tool call's `:sub-items` via the `subagentChatId` protocol link, and rendered indented under it when expanded.
+
+**Tab focus + Enter toggle.** Tab/Shift+Tab navigates between focusable items (tool-call, thinking). Enter/Space toggles `:expanded?`. Escape clears focus. Scroll adjusts to keep the focused item visible.
+
+### Stopping criteria
+
+- Collapsed tool-call renders 1 line; expanded shows args + output block
+- Thinking content creates a `:thinking` item; expands to show model reasoning
+- Sub-agent content appears nested under `eca__spawn_agent`, not suppressed or in main flow
+- Tab focuses next tool-call/thinking item; Enter toggles; Escape clears focus
+- Scroll adjusts to keep focused item visible
+
+---
+
+## Phase 6: Markdown Rendering
+
+**Goal:** Render assistant and user text through a markdown→ANSI converter so that bold, italic, code spans, fenced code blocks, headers, lists, and tables display as formatted output rather than raw syntax.
+
+### What to build
+
+**Markdown→ANSI converter.**
+A lightweight pass over text items before they are split into lines. Outputs ANSI escape sequences for bold (`\e[1m`), italic (`\e[3m`), dim (code spans), and resets. Fenced code blocks get a visual border and a language label. Headers are bold. Lists indent correctly. Tables render with column alignment.
+
+**Library evaluation.**
+Babashka can load Java libraries via `:mvn/version`. Candidates: `commonmark-java` (CommonMark spec-compliant, extensible) and `flexmark-java` (fast, configurable). Evaluate for binary size, Babashka compatibility, and ANSI output support. If neither fits, a purpose-built single-pass tokenizer covering the 80% case (bold, italic, code, headers, lists) is the fallback.
+
+**Scope.**
+Applies to `:assistant-text` and `:user` items. Tool output (`:out-text` in tool-call items) and thinking text are rendered plain — they are code/prose from tools, not model-authored markdown.
+
+**`url` content type.**
+With markdown rendering in place, `url` items (`{:type "url" :title "..." :url "..."}`) are a natural fit here: render as `title (url)` inline, or as an OSC 8 hyperlink where the terminal supports it.
+
+### Stopping criteria
+
+- Assistant text with `**bold**` renders with ANSI bold, not literal asterisks
+- Fenced code blocks display with a border and language label
+- Lists indent correctly; headers are visually distinct
+- `url` content items render as linked text in chat
+- Plain-text fallback if the markdown library is unavailable at runtime
+
+---
+
+## Phase 7: Message Steering
 
 **Goal:** Send messages to influence a running prompt without stopping it — the eca-bb equivalent of pi's message queue.
 
@@ -180,7 +238,7 @@ Alt+Enter queues a follow-up message, delivered only after the agent fully compl
 
 ---
 
-## Phase 6: Rich Interaction
+## Phase 8: Rich Interaction
 
 **Goal:** Handle server-initiated dialogue — the model can ask the user questions directly.
 
@@ -211,7 +269,7 @@ The question and the user's answer should appear in the chat history as a distin
 
 ---
 
-## Phase 7: Power Features
+## Phase 9: Power Features
 
 **Goal:** Surface the remaining ECA capabilities that reward power users — context injection, background jobs, and session surgery.
 
