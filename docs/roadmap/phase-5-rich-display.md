@@ -22,6 +22,24 @@ The `parentChatId` suppression (commit `6cb3696`) is an interim fix. This phase 
 
 ---
 
+## Implementation Order
+
+1. **Item model + initial state** — add `:args-text`, `:out-text`, `:expanded? false`, `:focused? false` to tool-call items at creation; `:sub-items []` on `eca__spawn_agent` items; add `:focus-path nil` and `:subagent-chats {}` to `initial-state`. Foundation — everything else depends on this.
+
+2. **Protocol handlers: args/output + thinking + hooks** — `toolCallRun` stores `:args-text`; `toolCalled` stores `:out-text` (truncate at 8 KB); `reasonStarted/Text/Finished`; `hookActionStarted/Finished`.
+
+3. **Task tool suppression + sub-agent routing** — intercept `{:server "eca" :name "task"}` and drop from `:items`; replace `parentChatId` suppression with routing to parent `:sub-items` via `:subagent-chats`; register sub-agent link on `toolCallRun` when `subagentDetails` present.
+
+4. **`upsert-tool-call` merge safety** — fix before view work (see Notes).
+
+5. **View: collapsed/expanded rendering** — `render-item-lines` gains collapsed/expanded branches per `:tool-call`, `:thinking`, `:hook`; box-drawing arg/output blocks; sub-item indentation; `▸ N steps` suffix; focus indicator (`›`).
+
+6. **Focus/navigation** — Tab/Shift+Tab build render-order path list and advance/reverse; Enter/Space toggles `:expanded?` at `:focus-path`; Escape clears focus; Tab adjusts `:scroll-offset`.
+
+7. All unit tests green, then integration + manual pass.
+
+---
+
 ## What to Build
 
 ### 1. Extended item model
@@ -502,6 +520,62 @@ No new top-level modes. Focus is orthogonal to existing modes.
       (is (some #(clojure.string/includes? % "I should") lines)))))
 ```
 
+#### Additional `state_test.clj` tests
+
+```clojure
+;; upsert-tool-call preserves :expanded? across subsequent events
+(deftest upsert-preserves-expanded-test
+  (testing "toolCalled does not reset :expanded? on an already-expanded item"
+    (let [base  (assoc (base-state) :mode :chatting
+                       :items [{:type :tool-call :id "tc1" :name "read_file"
+                                :state :running :expanded? true :focused? false}])
+          [s _] (handle-eca-notification
+                  base {:method "chat/contentReceived"
+                        :params {:chatId "chat1" :role "assistant"
+                                 :content {:type "toolCalled" :id "tc1" :name "read_file"
+                                           :server "fs" :arguments {} :error false}}})]
+      (is (true? (get-in s [:items 0 :expanded?]))))))
+
+;; :out-text truncated at 8 KB
+(deftest out-text-truncation-test
+  (testing "toolCalled with large output truncates :out-text"
+    (let [big   (apply str (repeat 9000 "x"))
+          base  (assoc (base-state) :mode :chatting
+                       :items [{:type :tool-call :id "tc1" :name "read_file"
+                                :state :running :expanded? false}])
+          [s _] (handle-eca-notification
+                  base {:method "chat/contentReceived"
+                        :params {:chatId "chat1" :role "assistant"
+                                 :content {:type "toolCalled" :id "tc1" :name "read_file"
+                                           :server "fs" :arguments {} :error false
+                                           :output big}}})]
+      (is (<= (count (get-in s [:items 0 :out-text])) 8200))
+      (is (clojure.string/includes? (get-in s [:items 0 :out-text]) "[truncated]")))))
+
+;; Task tool suppressed
+(deftest task-tool-suppressed-test
+  (testing "toolCallPrepare for eca/task tool does not add to :items"
+    (let [[s _] (handle-eca-notification
+                  (assoc (base-state) :mode :chatting)
+                  {:method "chat/contentReceived"
+                   :params {:chatId "chat1" :role "assistant"
+                            :content {:type "toolCallPrepare" :id "tc1"
+                                      :name "task" :server "eca" :summary "bg task"}}})]
+      (is (empty? (:items s))))))
+
+;; parentChatId fallthrough when no parent registered
+(deftest subagent-fallthrough-test
+  (testing "contentReceived with parentChatId and no registered parent falls through to main flow"
+    (let [base  (assoc (base-state) :mode :chatting :subagent-chats {})
+          [s _] (handle-eca-notification
+                  base {:method "chat/contentReceived"
+                        :params {:chatId       "unregistered-sub"
+                                 :parentChatId "chat1"
+                                 :role         "assistant"
+                                 :content      {:type "text" :text "fallthrough"}}})]
+      (is (= 1 (count (:items s)))))))
+```
+
 ---
 
 ## Stopping Criteria
@@ -513,19 +587,21 @@ No new top-level modes. Focus is orthogonal to existing modes.
 3. `toolCalled` handler stores `:out-text` on matching tool-call item.
 4. `contentReceived` with `parentChatId` routes to parent `:sub-items` when registered; falls through to normal handling otherwise.
 5. `reasonStarted` creates a `:thinking` item with empty `:text` and `:status :thinking`; `reasonText` appends to it; `reasonFinished` sets `:status :thought`.
-5a. `hookActionStarted` creates a `:hook` item with `:status :running`; `hookActionFinished` sets `:status :ok/:failed` and stores `:out-text`.
-6. Tab in `:ready` mode with focusable items sets `:focus-path` to first focusable item.
-7. Tab again advances focus in render order; wraps at end.
-8. Escape clears focus, does not change mode.
-9. Enter on focused item toggles `:expanded?`; rebuilds lines.
-10. Collapsed tool-call renders exactly 1 line.
-11. Expanded tool-call with `:args-text` and `:out-text` renders > 1 line, content includes both.
-12. Collapsed thinking renders 1 line containing `▸`.
-13. Expanded thinking renders > 1 line, content visible.
-14. `eca__spawn_agent` expanded with non-empty `:sub-items` renders sub-items indented.
-15. Tab skips sub-items of a collapsed spawn block; visiting only top-level focusable items.
-16. Tab reaches sub-items when the parent spawn block is expanded.
-17. Enter on a focused sub-item (`:focus-path [i j]`) toggles that sub-item's `:expanded?`.
+6. `hookActionStarted` creates a `:hook` item with `:status :running`; `hookActionFinished` sets `:status :ok/:failed` and stores `:out-text`.
+7. Tab in `:ready` mode with focusable items sets `:focus-path` to first focusable item.
+8. Tab again advances focus in render order; wraps at end.
+9. Escape clears focus, does not change mode.
+10. Enter on focused item toggles `:expanded?`; rebuilds lines.
+11. Collapsed tool-call renders exactly 1 line.
+12. Expanded tool-call with `:args-text` and `:out-text` renders > 1 line, content includes both.
+13. Collapsed thinking renders 1 line containing `▸`.
+14. Expanded thinking renders > 1 line, content visible.
+15. `eca__spawn_agent` expanded with non-empty `:sub-items` renders sub-items indented.
+16. Tab skips sub-items of a collapsed spawn block; visiting only top-level focusable items.
+17. Tab reaches sub-items when the parent spawn block is expanded.
+18. Enter on a focused sub-item (`:focus-path [i j]`) toggles that sub-item's `:expanded?`.
+19. `toolCallPrepare` / `toolCallRun` with `{:server "eca" :name "task"}` produces no entry in `:items`.
+20. `upsert-tool-call` preserves `:expanded?` — expanding a tool block stays expanded when a subsequent event (e.g. `toolCalled`) updates the same item.
 
 ### Integration (`bb itest`)
 
@@ -562,6 +638,8 @@ No new top-level modes. Focus is orthogonal to existing modes.
 - **Syntax highlighting deferred.** Code blocks within tool output are rendered as plain text in this phase. A future phase (post–4.5) can add a lightweight tokenizer for common languages. ANSI colors from ECA pass through unchanged.
 
 - **`subagentDetails` availability.** The `SubagentDetails` struct (`subagentChatId`) is present on `toolCallRun` params per the ECA protocol spec. This is the link that populates `:subagent-chats`. If ECA sends it, routing works automatically; if absent (tool is not a sub-agent spawn), `:subagent-chats` is not updated and `parentChatId` content falls through.
+
+- **`upsert-tool-call` merge safety.** Current implementation uses `merge`, so a subsequent event (e.g. `toolCalled`) will clobber `:expanded?` back to false if the incoming map carries that key. Fix: strip `:expanded?` and `:focused?` from the incoming map before merging, or explicitly restore them from the pre-merge item after merge. Failing to do this causes user-expanded blocks to snap back to collapsed on the next tool event.
 
 - **No new modes.** Focus state is orthogonal to `:ready`/`:chatting`/`:approving`. Tab and Enter remain active in both `:ready` and `:chatting` (so the user can inspect previous tool blocks while the agent is working).
 

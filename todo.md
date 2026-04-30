@@ -1,0 +1,4 @@
+- implement highlighting with mouse for copy and paste
+- implement wordwrap
+- fix resizing causing a flurry of redraws
+- could login use a picker instead of typing out provider?
