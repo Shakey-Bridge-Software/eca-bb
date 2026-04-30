@@ -445,3 +445,55 @@
       (Thread/sleep 500)
       (is (not (str/includes? (screen) "picker-exec-seed-xyzzy"))))
     (finally (kill!))))
+
+;; ---------------------------------------------------------------------------
+;; Phase 5 — Rich Display (criteria 15–19)
+;; ---------------------------------------------------------------------------
+
+(deftest phase5-tool-block-and-focus-test
+  ;; Sends a prompt that reliably invokes the read_file tool. After the agent
+  ;; finishes, checks collapsed tool block then Tab/Enter/Escape interactions.
+  (start! itest-cmd)
+  (try
+    (sh "touch" "/tmp/eca-bb-itest/phase5-sentinel.txt")
+    (keys! "Read the file /tmp/eca-bb-itest/phase5-sentinel.txt" "Enter")
+
+    (testing "15: collapsed tool block with ✓ icon visible after tool call completes"
+      (wait-for! #(and (str/includes? % "SAFE") (str/includes? % "✓")) 60000)
+      (is (str/includes? (screen) "✓")))
+
+    (testing "16: Tab moves focus to tool block — › indicator visible"
+      (keys! "Tab")
+      (Thread/sleep 300)
+      (is (str/includes? (screen) "›")))
+
+    (testing "17: Enter expands block — ▾ marker and Arguments box visible"
+      (keys! "Enter")
+      (Thread/sleep 300)
+      (let [s (screen)]
+        (is (str/includes? s "▾"))
+        (is (str/includes? s "Arguments"))))
+
+    (testing "18: Enter again collapses block — ▾ marker gone"
+      (keys! "Enter")
+      (Thread/sleep 300)
+      (is (not (str/includes? (screen) "▾"))))
+
+    (testing "19: Escape clears focus — › gone"
+      (keys! "Tab")
+      (Thread/sleep 200)
+      (keys! "Escape")
+      (Thread/sleep 200)
+      (is (not (str/includes? (screen) "›"))))
+
+    (finally (kill!))))
+
+;; Phase 5 criteria 20–22 (sub-agent spawn block, Tab into sub-items) are manual.
+;; Requires sending a prompt that triggers eca__spawn_agent, which depends on
+;; the selected agent and LLM routing — not deterministic from CLI alone.
+;; Manual runbook:
+;;   20. Send a prompt to an agent that uses sub-agents (e.g. orchestrator).
+;;       After completion, collapsed spawn block shows "▸ N steps" suffix.
+;;   21. Tab to spawn block, Enter to expand — sub-agent steps appear indented.
+;;   22. Tab again reaches a sub-item inside the expanded block;
+;;       Enter expands it to show its args/output indented.

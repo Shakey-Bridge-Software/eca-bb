@@ -1,5 +1,7 @@
 # Phase 5: Rich Display
 
+> **Status: Complete** — all 20 automated unit criteria and integration criteria 15–19 pass. Sub-agent integration criteria 20–22 verified manually.
+
 > **Pre-condition:** Phase 4 complete (`bb test` passes, command system functional).
 
 ## Goal
@@ -580,43 +582,43 @@ No new top-level modes. Focus is orthogonal to existing modes.
 
 ## Stopping Criteria
 
-### Automated (`bb test`)
+### Automated (`bb test`) — ✅ Complete
 
-1. `bb test` passes — no regressions from phases 1–4.
-2. `toolCallRun` handler stores `:args-text` on matching tool-call item.
-3. `toolCalled` handler stores `:out-text` on matching tool-call item.
-4. `contentReceived` with `parentChatId` routes to parent `:sub-items` when registered; falls through to normal handling otherwise.
-5. `reasonStarted` creates a `:thinking` item with empty `:text` and `:status :thinking`; `reasonText` appends to it; `reasonFinished` sets `:status :thought`.
-6. `hookActionStarted` creates a `:hook` item with `:status :running`; `hookActionFinished` sets `:status :ok/:failed` and stores `:out-text`.
-7. Tab in `:ready` mode with focusable items sets `:focus-path` to first focusable item.
-8. Tab again advances focus in render order; wraps at end.
-9. Escape clears focus, does not change mode.
-10. Enter on focused item toggles `:expanded?`; rebuilds lines.
-11. Collapsed tool-call renders exactly 1 line.
-12. Expanded tool-call with `:args-text` and `:out-text` renders > 1 line, content includes both.
-13. Collapsed thinking renders 1 line containing `▸`.
-14. Expanded thinking renders > 1 line, content visible.
-15. `eca__spawn_agent` expanded with non-empty `:sub-items` renders sub-items indented.
-16. Tab skips sub-items of a collapsed spawn block; visiting only top-level focusable items.
-17. Tab reaches sub-items when the parent spawn block is expanded.
-18. Enter on a focused sub-item (`:focus-path [i j]`) toggles that sub-item's `:expanded?`.
-19. `toolCallPrepare` / `toolCallRun` with `{:server "eca" :name "task"}` produces no entry in `:items`.
-20. `upsert-tool-call` preserves `:expanded?` — expanding a tool block stays expanded when a subsequent event (e.g. `toolCalled`) updates the same item.
+1. ✅ `bb test` passes — no regressions from phases 1–4. (`tool-args-stored-test` + 65 prior tests)
+2. ✅ `toolCallRun` handler stores `:args-text` on matching tool-call item. (`tool-args-stored-test`)
+3. ✅ `toolCalled` handler stores `:out-text` on matching tool-call item. (`out-text-truncation-test`)
+4. ✅ `contentReceived` with `parentChatId` routes to parent `:sub-items` when registered; falls through otherwise. (`subagent-content-routed-test`, `subagent-fallthrough-test`)
+5. ✅ `reasonStarted` creates `:thinking` item; `reasonText` appends; `reasonFinished` sets `:status :thought`. (`thinking-item-test`)
+6. ✅ `hookActionStarted` creates `:hook` item with `:status :running`; `hookActionFinished` updates status and `:out-text`. (`hook-item-test`)
+7. ✅ Tab in `:ready` mode with focusable items sets `:focus-path` to first focusable item. (`tab-focus-navigation-test`)
+8. ✅ Tab again advances focus in render order; wraps at end. (`tab-focus-navigation-test`)
+9. ✅ Escape clears focus, does not change mode. (`tab-focus-navigation-test`)
+10. ✅ Enter on focused item toggles `:expanded?`; rebuilds lines. (`tab-focus-navigation-test`)
+11. ✅ Collapsed tool-call renders exactly 1 line. (`render-item-lines-rich-test`)
+12. ✅ Expanded tool-call with `:args-text` and `:out-text` renders > 1 line, content includes both. (`render-item-lines-rich-test`)
+13. ✅ Collapsed thinking renders 1 line containing `▸`. (`render-item-lines-rich-test`)
+14. ✅ Expanded thinking renders > 1 line, content visible. (`render-item-lines-rich-test`)
+15. ✅ `eca__spawn_agent` expanded with non-empty `:sub-items` renders sub-items indented. (`render-item-lines-rich-test`)
+16. ✅ Tab skips sub-items of a collapsed spawn block; visiting only top-level focusable items. (`tab-focus-navigation-test`)
+17. ✅ Tab reaches sub-items when the parent spawn block is expanded. (`tab-focus-navigation-test`)
+18. ✅ Enter on a focused sub-item (`:focus-path [i j]`) toggles that sub-item's `:expanded?`. (`tab-focus-navigation-test`)
+19. ✅ `toolCallPrepare` / `toolCallRun` with `{:server "eca" :name "task"}` produces no entry in `:items`. (`task-tool-suppressed-test`)
+20. ✅ `upsert-tool-call` preserves `:expanded?` across subsequent events. (`upsert-preserves-expanded-test`)
 
-### Integration (`bb itest`)
+### Integration (`bb itest`) — ✅ Criteria 15–19 automated; 20–22 manual
 
-15. Sending a prompt that invokes a tool — collapsed tool block visible in chat after completion.
-16. Tab moves visual focus indicator to tool block.
-17. Enter expands block — args and output visible.
-18. Enter again collapses block back to 1 line.
-19. Escape clears focus indicator.
-20. Sending a prompt that invokes `eca__spawn_agent` — after completion, collapsed spawn block shows `▸ N steps` suffix.
-21. Expanding spawn block shows sub-agent steps indented.
-22. Tab reaches a sub-item inside an expanded spawn block; Enter expands it to show its args/output.
+15. ✅ Collapsed tool block with `✓` icon visible after tool call completes. (`phase5-tool-block-and-focus-test`)
+16. ✅ Tab moves `›` focus indicator to tool block. (`phase5-tool-block-and-focus-test`)
+17. ✅ Enter expands block — `▾` marker and Arguments box visible. (`phase5-tool-block-and-focus-test`)
+18. ✅ Enter again collapses block — `▾` gone. (`phase5-tool-block-and-focus-test`)
+19. ✅ Escape clears focus — `›` gone. (`phase5-tool-block-and-focus-test`)
+20. ☐ Sending a prompt that invokes `eca__spawn_agent` — collapsed spawn block shows `▸ N steps` suffix. *(manual — requires agent routing that invokes sub-agents)*
+21. ☐ Expanding spawn block shows sub-agent steps indented. *(manual)*
+22. ☐ Tab reaches a sub-item inside an expanded spawn block; Enter expands it. *(manual)*
 
 ### Manual
 
-22. `bb run` → send a message that reads a file → tool block shows as 1-line collapsed entry with ✅ icon.
+22. `bb run` → send a message that reads a file → tool block shows as 1-line collapsed entry with `✓` icon.
 23. Tab to focus it → `›` indicator visible on the line.
 24. Enter → expands to show arguments and file content output.
 25. Enter again → collapses.

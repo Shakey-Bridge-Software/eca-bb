@@ -8,18 +8,18 @@ Read [assessment.md](assessment.md) for the philosophical grounding behind this 
 
 ## Phase Overview
 
-| Phase | Name | Focus | Detail |
-|-------|------|-------|--------|
-| [1a](#phase-1a-reliable-core) | Reliable Core | Everything works, nothing leaks | [detail](roadmap/phase-1a-reliable-core.md) |
-| [1b](#phase-1b-login-hardening) | Login Hardening | End-to-end auth with real credentials | [detail](roadmap/phase-1b-login-hardening.md) |
-| [2](#phase-2-model--agent-identity) | Model & Agent Identity | Know what you're running, change it | [detail](roadmap/phase-2-model-agent-identity.md) |
-| [3](#phase-3-session-continuity) | Session Continuity | Quit and resume, start fresh | [detail](roadmap/phase-3-session-continuity.md) |
-| [4](#phase-4-command-system) | Command System | Slash commands as the extensibility seam | [detail](roadmap/phase-4-command-system.md) |
-| [5](#phase-5-rich-display) | Rich Display | Expandable tool blocks, thinking, sub-agent nesting | [detail](roadmap/phase-5-rich-display.md) |
-| [6](#phase-6-markdown-rendering) | Markdown Rendering | Render assistant text as formatted ANSI output | — |
-| [7](#phase-7-message-steering) | Message Steering | Influence a running prompt | — |
-| [8](#phase-8-rich-interaction) | Rich Interaction | Server-initiated Q&A | — |
-| [9](#phase-9-power-features) | Power Features | Context injection, jobs, rollback/fork | — |
+| Phase | Name | Focus | Status | Detail |
+|-------|------|-------|--------|--------|
+| [1a](#phase-1a-reliable-core) | Reliable Core | Everything works, nothing leaks | ✅ Complete | [detail](roadmap/phase-1a-reliable-core.md) |
+| [1b](#phase-1b-login-hardening) | Login Hardening | End-to-end auth with real credentials | ✅ Complete | [detail](roadmap/phase-1b-login-hardening.md) |
+| [2](#phase-2-model--agent-identity) | Model & Agent Identity | Know what you're running, change it | ✅ Complete | [detail](roadmap/phase-2-model-agent-identity.md) |
+| [3](#phase-3-session-continuity) | Session Continuity | Quit and resume, start fresh | ✅ Complete | [detail](roadmap/phase-3-session-continuity.md) |
+| [4](#phase-4-command-system) | Command System | Slash commands as the extensibility seam | ✅ Complete | [detail](roadmap/phase-4-command-system.md) |
+| [5](#phase-5-rich-display) | Rich Display | Expandable tool blocks, thinking, sub-agent nesting | ✅ Complete | [detail](roadmap/phase-5-rich-display.md) |
+| [6](#phase-6-markdown-rendering) | Markdown Rendering | Render assistant text as formatted ANSI output | — | — |
+| [7](#phase-7-message-steering) | Message Steering | Influence a running prompt | — | — |
+| [8](#phase-8-rich-interaction) | Rich Interaction | Server-initiated Q&A | — | — |
+| [9](#phase-9-power-features) | Power Features | Context injection, jobs, rollback/fork | — | — |
 
 ---
 

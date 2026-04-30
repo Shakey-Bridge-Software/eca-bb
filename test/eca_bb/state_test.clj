@@ -904,6 +904,21 @@
 
 ;; --- Phase 5: Rich Display ---
 
+(deftest tool-args-stored-test
+  (testing "toolCallRun stores :args-text on the tool-call item"
+    (with-redefs [protocol/approve-tool! (fn [& _] nil)]
+      (let [[s _] (handle-eca-notification
+                    (base-state)
+                    {:method "chat/contentReceived"
+                     :params {:chatId "chat1" :role "assistant"
+                              :content {:type "toolCallRun" :id "tc1"
+                                        :name "read_file" :server "fs"
+                                        :summary "read foo.clj"
+                                        :arguments {"path" "foo.clj"}
+                                        :manualApproval false}}})]
+        (is (some? (get-in s [:items 0 :args-text])))
+        (is (clojure.string/includes? (get-in s [:items 0 :args-text]) "foo.clj"))))))
+
 (deftest upsert-preserves-expanded-test
   (testing "toolCalled does not reset :expanded? on an already-expanded item"
     (let [base  (assoc (base-state) :mode :chatting
