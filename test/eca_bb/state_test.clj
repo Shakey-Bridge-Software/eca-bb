@@ -35,6 +35,8 @@
    :input                 (ti/text-input)
    :input-history         []
    :history-idx           nil
+   :focus-path            nil
+   :subagent-chats        {}
    :chat-lines            []
    :scroll-offset         0
    :width                 80
@@ -236,10 +238,10 @@
       (is (= 1 (count (:items s))))
       (is (= :system (:type (first (:items s))))))))
 
-;; --- subagent suppression ---
+;; --- subagent routing ---
 
 (deftest subagent-content-suppressed-test
-  (testing "contentReceived with parentChatId is ignored — no items added"
+  (testing "contentReceived with parentChatId and no registered parent falls through (text → current-text)"
     (let [base (assoc (base-state) :mode :chatting)
           [s _] (handle-eca-notification
                   base
@@ -248,7 +250,8 @@
                             :parentChatId "chat1"
                             :role         "assistant"
                             :content      {:type "text" :text "verbatim file contents..."}}})]
-      (is (= base s))))
+      (is (= "verbatim file contents..." (:current-text s)))
+      (is (empty? (:items s)))))
 
   (testing "contentReceived without parentChatId is processed normally"
     (let [[s _] (handle-eca-notification
@@ -897,4 +900,211 @@
       (is (= :ready (:mode s)))
       (is (some #(and (= :system (:type %))
                       (clojure.string/includes? (:text %) "No models"))
-                (:items s)))))))
+                (:items s))))))
+
+;; --- Phase 5: Rich Display ---
+
+(deftest upsert-preserves-expanded-test
+  (testing "toolCalled does not reset :expanded? on an already-expanded item"
+    (let [base  (assoc (base-state) :mode :chatting
+                       :items [{:type :tool-call :id "tc1" :name "read_file"
+                                :state :running :expanded? true :focused? false}])
+          [s _] (handle-eca-notification
+                  base {:method "chat/contentReceived"
+                        :params {:chatId "chat1" :role "assistant"
+                                 :content {:type "toolCalled" :id "tc1" :name "read_file"
+                                           :server "fs" :arguments {} :error false}}})]
+      (is (true? (get-in s [:items 0 :expanded?]))))))
+
+(deftest out-text-truncation-test
+  (testing "toolCalled with large output truncates :out-text"
+    (let [big   (apply str (repeat 9000 "x"))
+          base  (assoc (base-state) :mode :chatting
+                       :items [{:type :tool-call :id "tc1" :name "read_file"
+                                :state :running :expanded? false}])
+          [s _] (handle-eca-notification
+                  base {:method "chat/contentReceived"
+                        :params {:chatId "chat1" :role "assistant"
+                                 :content {:type "toolCalled" :id "tc1" :name "read_file"
+                                           :server "fs" :arguments {} :error false
+                                           :output big}}})]
+      (is (<= (count (get-in s [:items 0 :out-text])) 8210))
+      (is (clojure.string/includes? (get-in s [:items 0 :out-text]) "[truncated]")))))
+
+(deftest task-tool-suppressed-test
+  (testing "toolCallPrepare for eca/task tool does not add to :items"
+    (let [[s _] (handle-eca-notification
+                  (assoc (base-state) :mode :chatting)
+                  {:method "chat/contentReceived"
+                   :params {:chatId "chat1" :role "assistant"
+                            :content {:type "toolCallPrepare" :id "tc1"
+                                      :name "task" :server "eca" :summary "bg task"}}})]
+      (is (empty? (:items s)))))
+
+  (testing "toolCallRun for eca/task tool does not add to :items"
+    (let [[s _] (handle-eca-notification
+                  (assoc (base-state) :mode :chatting)
+                  {:method "chat/contentReceived"
+                   :params {:chatId "chat1" :role "assistant"
+                            :content {:type "toolCallRun" :id "tc1"
+                                      :name "task" :server "eca"
+                                      :summary "bg task" :arguments {}}}})]
+      (is (empty? (:items s))))))
+
+(deftest subagent-fallthrough-test
+  (testing "contentReceived with parentChatId and no registered parent falls through to main flow"
+    (let [base  (assoc (base-state) :mode :chatting :subagent-chats {})
+          [s _] (handle-eca-notification
+                  base {:method "chat/contentReceived"
+                        :params {:chatId       "unregistered-sub"
+                                 :parentChatId "chat1"
+                                 :role         "assistant"
+                                 :content      {:type "text" :text "fallthrough"}}})]
+      ;; text content goes to :current-text (not :items) via normal handle-content
+      (is (= "fallthrough" (:current-text s))))))
+
+(deftest hook-item-test
+  (testing "hookActionStarted creates :hook item with :running status"
+    (let [[s _] (handle-eca-notification
+                  (assoc (base-state) :mode :chatting)
+                  {:method "chat/contentReceived"
+                   :params {:chatId "chat1" :role "assistant"
+                            :content {:type "hookActionStarted" :id "h1" :name "pre-tool"}}})]
+      (is (= 1 (count (:items s))))
+      (is (= :hook    (:type   (first (:items s)))))
+      (is (= "h1"     (:id     (first (:items s)))))
+      (is (= :running (:status (first (:items s)))))))
+
+  (testing "hookActionFinished updates status and stores output"
+    (let [base  (assoc (base-state) :mode :chatting
+                       :items [{:type :hook :id "h1" :name "pre-tool"
+                                :status :running :out-text nil :expanded? false}])
+          [s _] (handle-eca-notification
+                  base {:method "chat/contentReceived"
+                        :params {:chatId "chat1" :role "assistant"
+                                 :content {:type "hookActionFinished" :id "h1"
+                                           :status "ok" :output "done"}}})]
+      (is (= :ok    (:status   (first (:items s)))))
+      (is (= "done" (:out-text (first (:items s))))))))
+
+(deftest thinking-item-test
+  (testing "reasonStarted creates :thinking item"
+    (let [[s _] (handle-eca-notification
+                  (assoc (base-state) :mode :chatting)
+                  {:method "chat/contentReceived"
+                   :params {:chatId "chat1" :role "assistant"
+                            :content {:type "reasonStarted" :id "r1"}}})]
+      (is (= 1 (count (:items s))))
+      (is (= :thinking (:type   (first (:items s)))))
+      (is (= "r1"      (:id     (first (:items s)))))
+      (is (= ""        (:text   (first (:items s)))))
+      (is (= :thinking (:status (first (:items s)))))
+      (is (false? (:expanded? (first (:items s)))))))
+
+  (testing "reasonText appends to matching :thinking item"
+    (let [base  (assoc (base-state) :mode :chatting
+                       :items [{:type :thinking :id "r1" :text "" :status :thinking
+                                :expanded? false}])
+          [s _] (handle-eca-notification
+                  base {:method "chat/contentReceived"
+                        :params {:chatId "chat1" :role "assistant"
+                                 :content {:type "reasonText" :id "r1" :text "I should..."}}})]
+      (is (= "I should..." (:text (first (:items s)))))))
+
+  (testing "reasonFinished sets :status to :thought"
+    (let [base  (assoc (base-state) :mode :chatting
+                       :items [{:type :thinking :id "r1" :text "I should..." :status :thinking
+                                :expanded? false}])
+          [s _] (handle-eca-notification
+                  base {:method "chat/contentReceived"
+                        :params {:chatId "chat1" :role "assistant"
+                                 :content {:type "reasonFinished" :id "r1" :totalTimeMs 1234}}})]
+      (is (= :thought (:status (first (:items s))))))))
+
+(deftest subagent-content-routed-test
+  (testing "contentReceived with parentChatId is routed to parent tool call sub-items"
+    (let [base  (-> (base-state)
+                    (assoc :mode :chatting
+                           :items [{:type :tool-call :name "eca__spawn_agent"
+                                    :id "tc1" :state :called
+                                    :expanded? false :sub-items []}]
+                           :subagent-chats {"sub-42" 0}))
+          [s _] (handle-eca-notification
+                  base {:method "chat/contentReceived"
+                        :params {:chatId       "sub-42"
+                                 :parentChatId "chat1"
+                                 :role         "assistant"
+                                 :content      {:type "text" :text "sub result"}}})]
+      (is (= 1 (count (:items s))))
+      (is (= 1 (count (get-in s [:items 0 :sub-items])))))))
+
+(deftest tab-focus-navigation-test
+  (testing "Tab in :ready with tool-call items sets focus-path to first focusable"
+    (let [base (assoc (base-state)
+                      :mode :ready
+                      :focus-path nil
+                      :items [{:type :user :text "hi"}
+                              {:type :tool-call :name "read_file" :state :called
+                               :expanded? false :focused? false}])
+          [s _] (state/update-state base (msg/key-press :tab))]
+      (is (= [1] (:focus-path s)))))
+
+  (testing "Enter on focused tool-call toggles :expanded?"
+    (let [base (assoc (base-state)
+                      :mode :ready
+                      :focus-path [0]
+                      :items [{:type :tool-call :name "read_file" :state :called
+                               :expanded? false :focused? true}])
+          [s _] (state/update-state base (msg/key-press :enter))]
+      (is (true? (get-in s [:items 0 :expanded?])))))
+
+  (testing "Escape clears focus, does not change mode"
+    (let [base (assoc (base-state)
+                      :mode :ready
+                      :focus-path [0]
+                      :items [{:type :tool-call :name "read_file" :state :called
+                               :expanded? false :focused? true}])
+          [s _] (state/update-state base (msg/key-press :escape))]
+      (is (nil? (:focus-path s)))
+      (is (= :ready (:mode s)))))
+
+  (testing "Tab skips sub-items of a collapsed spawn block"
+    (let [base (assoc (base-state)
+                      :mode :ready
+                      :focus-path nil
+                      :items [{:type :tool-call :name "read_file" :state :called
+                               :expanded? false :focused? false}
+                              {:type :tool-call :name "eca__spawn_agent" :state :called
+                               :expanded? false :focused? false
+                               :sub-items [{:type :tool-call :name "list_dir"
+                                            :state :called :expanded? false}]}])
+          [s1 _] (state/update-state base (msg/key-press :tab))
+          [s2 _] (state/update-state s1   (msg/key-press :tab))
+          [s3 _] (state/update-state s2   (msg/key-press :tab))]
+      (is (= [0] (:focus-path s1)))
+      (is (= [1] (:focus-path s2)))
+      (is (= [0] (:focus-path s3)))))
+
+  (testing "Tab reaches sub-items when spawn block is expanded"
+    (let [base (assoc (base-state)
+                      :mode :ready
+                      :focus-path nil
+                      :items [{:type :tool-call :name "eca__spawn_agent" :state :called
+                               :expanded? true :focused? false
+                               :sub-items [{:type :tool-call :name "read_file"
+                                            :state :called :expanded? false}]}])
+          [s1 _] (state/update-state base (msg/key-press :tab))
+          [s2 _] (state/update-state s1   (msg/key-press :tab))]
+      (is (= [0]   (:focus-path s1)))
+      (is (= [0 0] (:focus-path s2)))))
+
+  (testing "Enter on focused sub-item toggles its :expanded?"
+    (let [base (assoc (base-state)
+                      :mode :ready
+                      :focus-path [0 0]
+                      :items [{:type :tool-call :name "eca__spawn_agent" :state :called
+                               :expanded? true :focused? false
+                               :sub-items [{:type :tool-call :name "read_file"
+                                            :state :called :expanded? false}]}])
+          [s _] (state/update-state base (msg/key-press :enter))]
+      (is (true? (get-in s [:items 0 :sub-items 0 :expanded?])))))))

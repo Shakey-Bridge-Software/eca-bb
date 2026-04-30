@@ -1,5 +1,6 @@
 (ns eca-bb.state
   (:require [clojure.string :as str]
+            [cheshire.core :as json]
             [charm.program :as program]
             [charm.components.list :as cl]
             [charm.components.text-input :as ti]
@@ -36,10 +37,75 @@
                   (if (some #(= id (:id %)) items)
                     (mapv (fn [item]
                             (if (= id (:id item))
-                              (merge item {:type :tool-call} tool-call)
+                              ;; Protect interactive state from being clobbered by incoming events
+                              (let [protected (select-keys item [:expanded? :focused? :sub-items])]
+                                (merge item {:type :tool-call}
+                                       (dissoc tool-call :expanded? :focused? :sub-items)
+                                       protected))
                               item))
                           items)
-                    (conj items (assoc merged :type :tool-call))))))))
+                    (let [spawn? (= "eca__spawn_agent" (:name merged))
+                          base   (cond-> (assoc merged :type :tool-call
+                                                       :expanded? false :focused? false)
+                                   spawn? (assoc :sub-items []))]
+                      (conj items base))))))))
+
+(defn- content->item [params]
+  (let [content (:content params)]
+    (case (:type content)
+      "text"
+      {:type :assistant-text :text (:text content)}
+
+      ("toolCallPrepare" "toolCallRunning" "toolCallRun" "toolCalled" "toolCallRejected")
+      {:type :tool-call :id (:id content) :name (:name content)
+       :server (:server content) :summary (:summary content)
+       :state (case (:type content)
+                "toolCallPrepare"  :preparing
+                "toolCallRun"      :run
+                "toolCallRunning"  :running
+                "toolCalled"       :called
+                "toolCallRejected" :rejected)
+       :expanded? false :focused? false}
+
+      "reasonStarted"
+      {:type :thinking :id (:id content) :text "" :status :thinking
+       :expanded? false :focused? false}
+
+      nil)))
+
+(defn- focusable-paths [items]
+  (into []
+    (mapcat
+      (fn [[i item]]
+        (when (#{:tool-call :thinking :hook} (:type item))
+          (cons [i]
+            (when (:expanded? item)
+              (keep-indexed
+                (fn [j sub]
+                  (when (#{:tool-call :thinking :hook} (:type sub))
+                    [i j]))
+                (or (:sub-items item) []))))))
+      (map-indexed vector items))))
+
+(defn- sync-focus [state]
+  (let [path   (:focus-path state)
+        items  (mapv (fn [item]
+                       (cond-> (assoc item :focused? false)
+                         (:sub-items item)
+                         (update :sub-items #(mapv (fn [s] (assoc s :focused? false)) %))))
+                     (:items state))
+        items' (if path
+                 (let [[i j] path]
+                   (if j
+                     (assoc-in items [i :sub-items j :focused?] true)
+                     (assoc-in items [i :focused?] true)))
+                 items)]
+    (assoc state :items items')))
+
+(defn- register-subagent [state tool-id subagent-chat-id]
+  (if-let [idx (first (keep-indexed #(when (= tool-id (:id %2)) %1) (:items state)))]
+    (assoc-in state [:subagent-chats subagent-chat-id] idx)
+    state))
 
 ;; --- Commands ---
 
@@ -166,31 +232,45 @@
         state)
 
       "toolCallPrepare"
-      (-> state
-          flush-current-text
-          (upsert-tool-call {:id             (:id content)
-                             :name           (:name content)
-                             :server         (:server content)
-                             :summary        (:summary content)
-                             :arguments-text (:argumentsText content)
-                             :state          :preparing})
-          rebuild-lines)
+      (if (and (= "eca" (:server content)) (= "task" (:name content)))
+        state
+        (-> state
+            flush-current-text
+            (upsert-tool-call {:id             (:id content)
+                               :name           (:name content)
+                               :server         (:server content)
+                               :summary        (:summary content)
+                               :arguments-text (:argumentsText content)
+                               :state          :preparing})
+            rebuild-lines))
 
       "toolCallRun"
-      (let [{:keys [id name server summary arguments manualApproval]} content
-            trust? (or (:trust state)
-                       (contains? (:session-trusted-tools state) name))
-            tool   {:id id :name name :server server
-                    :summary summary :arguments arguments :state :run}]
-        (if (and manualApproval (not trust?))
-          (-> state
-              (upsert-tool-call tool)
-              (assoc :mode :approving
-                     :pending-approval {:chat-id (:chat-id state) :tool-call-id id})
-              rebuild-lines)
-          (do
-            (protocol/approve-tool! (:server state) (:chat-id state) id)
-            (-> state (upsert-tool-call tool) rebuild-lines))))
+      (let [{:keys [id name server summary arguments manualApproval subagentDetails]} content]
+        (if (and (= "eca" server) (= "task" name))
+          state
+          (let [trust?    (or (:trust state)
+                              (contains? (:session-trusted-tools state) name))
+                args-text (when arguments
+                            (try (json/generate-string arguments)
+                                 (catch Exception _ (pr-str arguments))))
+                tool      {:id id :name name :server server
+                           :summary summary :arguments arguments
+                           :args-text args-text :state :run}]
+            (if (and manualApproval (not trust?))
+              (let [s' (-> state
+                           (upsert-tool-call tool)
+                           (assoc :mode :approving
+                                  :pending-approval {:chat-id (:chat-id state) :tool-call-id id})
+                           rebuild-lines)]
+                (cond-> s'
+                  subagentDetails
+                  (register-subagent id (:subagentChatId subagentDetails))))
+              (do
+                (protocol/approve-tool! (:server state) (:chat-id state) id)
+                (let [s' (-> state (upsert-tool-call tool) rebuild-lines)]
+                  (cond-> s'
+                    subagentDetails
+                    (register-subagent id (:subagentChatId subagentDetails)))))))))
 
       "toolCallRunning"
       (-> state
@@ -200,18 +280,65 @@
           rebuild-lines)
 
       "toolCalled"
-      (-> state
-          (upsert-tool-call {:id        (:id content) :name (:name content)
-                             :server    (:server content) :summary (:summary content)
-                             :arguments (:arguments content) :state :called
-                             :error?    (:error content)})
-          rebuild-lines)
+      (let [{:keys [id name server summary arguments output error]} content
+            out-text (when (seq (str output))
+                       (if (> (count output) 8192)
+                         (str (subs output 0 8192) "\n[truncated]")
+                         output))]
+        (-> state
+            (upsert-tool-call {:id id :name name :server server
+                               :summary summary :arguments arguments
+                               :state :called :error? error :out-text out-text})
+            rebuild-lines))
 
       "toolCallRejected"
       (-> state
           (upsert-tool-call {:id        (:id content) :name (:name content)
                              :server    (:server content) :summary (:summary content)
                              :arguments (:arguments content) :state :rejected})
+          rebuild-lines)
+
+      "reasonStarted"
+      (-> state
+          (update :items conj {:type :thinking :id (:id content) :text ""
+                               :status :thinking :expanded? false :focused? false})
+          rebuild-lines)
+
+      "reasonText"
+      (-> state
+          (update :items
+                  (fn [items]
+                    (mapv #(if (and (= :thinking (:type %)) (= (:id content) (:id %)))
+                             (update % :text str (:text content))
+                             %)
+                          items)))
+          rebuild-lines)
+
+      "reasonFinished"
+      (-> state
+          (update :items
+                  (fn [items]
+                    (mapv #(if (and (= :thinking (:type %)) (= (:id content) (:id %)))
+                             (assoc % :status :thought)
+                             %)
+                          items)))
+          rebuild-lines)
+
+      "hookActionStarted"
+      (-> state
+          (update :items conj {:type :hook :id (:id content) :name (:name content)
+                               :status :running :out-text nil :expanded? false :focused? false})
+          rebuild-lines)
+
+      "hookActionFinished"
+      (-> state
+          (update :items
+                  (fn [items]
+                    (mapv #(if (and (= :hook (:type %)) (= (:id content) (:id %)))
+                             (assoc % :status (keyword (:status content))
+                                      :out-text (:output content))
+                             %)
+                          items)))
           rebuild-lines)
 
       "usage"
@@ -249,23 +376,31 @@
     ;; Non-echo role:"user" text is a replayed historical message (session resume):
     ;; flush :current-text first so prior assistant responses land in the right position.
     ;; Non-text role:"user" content (e.g. progress start markers) is ignored.
-    ;; parentChatId present means this is sub-agent content — suppress from main view.
-    ;; The parent-level eca__spawn_agent tool call item is sufficient feedback.
+    ;; parentChatId present: route to parent spawn tool call's :sub-items if registered;
+    ;; fall through to normal handling if no parent registered (unknown sub-agent).
     (let [params  (:params notification)
           content (:content params)]
-      (if (:parentChatId params)
-        [state nil]
+      (if-let [parent-idx (and (:parentChatId params)
+                               (get (:subagent-chats state) (:chatId params)))]
+        [(-> state
+             (update-in [:items parent-idx :sub-items]
+                        (fn [subs]
+                          (if-let [item (content->item params)]
+                            (conj (or subs []) item)
+                            (or subs []))))
+             rebuild-lines)
+         nil]
         (if (= "user" (:role params))
-        (if (= "text" (:type content))
-          (if (:echo-pending state)
-            [(assoc state :echo-pending false) nil]
-            [(-> state
-                 flush-current-text
-                 (update :items conj {:type :user :text (or (:text content) "")})
-                 rebuild-lines)
-             nil])
-          [state nil])
-        [(handle-content state params) nil])))
+          (if (= "text" (:type content))
+            (if (:echo-pending state)
+              [(assoc state :echo-pending false) nil]
+              [(-> state
+                   flush-current-text
+                   (update :items conj {:type :user :text (or (:text content) "")})
+                   rebuild-lines)
+               nil])
+            [state nil])
+          [(handle-content state params) nil])))
 
     "providers/updated"
     (handle-providers-updated state (:params notification))
@@ -528,6 +663,8 @@
    :input                 (ti/text-input)
    :input-history         []
    :history-idx           nil
+   :focus-path            nil
+   :subagent-chats        {}
    :chat-lines            []
    :scroll-offset         0
    :width                 80
@@ -642,6 +779,51 @@
            (msg/key-match? msg "ctrl+l")
            (= :ready (:mode state)))
       (cmd-open-model-picker state)
+
+      ;; Focus navigation: Tab/Shift+Tab cycles through focusable items in render order
+      (and (msg/key-press? msg)
+           (msg/key-match? msg :tab)
+           (not (:alt msg))
+           (#{:ready :chatting} (:mode state)))
+      (let [paths (focusable-paths (:items state))]
+        (if (empty? paths)
+          [state nil]
+          (let [cur     (:focus-path state)
+                cur-idx (when cur (first (keep-indexed #(when (= cur %2) %1) paths)))
+                next    (if (nil? cur-idx)
+                          (first paths)
+                          (nth paths (mod (inc cur-idx) (count paths))))]
+            [(-> state (assoc :focus-path next) sync-focus rebuild-lines) nil])))
+
+      (and (msg/key-press? msg)
+           (msg/key-match? msg "shift+tab")
+           (#{:ready :chatting} (:mode state)))
+      (let [paths (focusable-paths (:items state))]
+        (if (empty? paths)
+          [state nil]
+          (let [cur     (:focus-path state)
+                n       (count paths)
+                cur-idx (when cur (first (keep-indexed #(when (= cur %2) %1) paths)))
+                prev    (if (nil? cur-idx)
+                          (last paths)
+                          (nth paths (mod (dec cur-idx) n)))]
+            [(-> state (assoc :focus-path prev) sync-focus rebuild-lines) nil])))
+
+      ;; Focus: Escape clears focus without changing mode
+      (and (msg/key-press? msg)
+           (msg/key-match? msg :escape)
+           (some? (:focus-path state))
+           (#{:ready :chatting} (:mode state)))
+      [(-> state (assoc :focus-path nil) sync-focus rebuild-lines) nil]
+
+      ;; Focus: Enter toggles :expanded? on focused item
+      (and (msg/key-press? msg)
+           (msg/key-match? msg :enter)
+           (some? (:focus-path state))
+           (#{:ready :chatting} (:mode state)))
+      (let [[i j] (:focus-path state)
+            item-path (if j [:items i :sub-items j] [:items i])]
+        [(-> state (update-in item-path update :expanded? not) rebuild-lines) nil])
 
       (and (msg/key-press? msg)
            (msg/key-match? msg :enter)

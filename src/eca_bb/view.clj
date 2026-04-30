@@ -7,6 +7,22 @@
 (defn divider [width]
   (apply str (repeat width "─")))
 
+(defn- render-box [label text width]
+  (let [box-w   (max 4 (- width 2))
+        inner-w (max 1 (- box-w 4))
+        fill-n  (max 0 (- box-w 4 (count label) 1))
+        top     (str "  ┌─ " label " " (apply str (repeat fill-n "─")) "┐")
+        bot     (str "  └" (apply str (repeat (- box-w 2) "─")) "┘")
+        lines   (when (seq (str text))
+                  (mapcat (fn [line]
+                            (let [wrapped (wrap/wrap-text line inner-w)]
+                              (mapv (fn [l]
+                                      (let [pad (apply str (repeat (max 0 (- inner-w (count l))) " "))]
+                                        (str "  │ " l pad " │")))
+                                    wrapped)))
+                          (str/split-lines (str text))))]
+    (concat [top] (or (seq lines) [(str "  │" (apply str (repeat (- box-w 2) " ")) "│")]) [bot])))
+
 (defn- render-tool-icon [tool-call]
   (case (:state tool-call)
     :preparing "⏳"
@@ -37,13 +53,51 @@
         []))
 
     :tool-call
-    ;; icon (2 cols) + " " (1 col) → inner budget = width - 3
-    (let [icon    (render-tool-icon item)
-          text    (or (:summary item) (:name item))
-          inner-w (max 1 (- width 3))
-          wrapped (wrap/wrap-text (str text) inner-w)]
-      (into [(str icon " " (first wrapped))]
-            (map #(str "   " %) (rest wrapped))))
+    (let [icon    (if (:focused? item) "›" (render-tool-icon item))
+          name    (:name item)
+          summary (or (:summary item) name)]
+      (if (:expanded? item)
+        (let [steps  (when (seq (:sub-items item))
+                       (str "  ▸ " (count (:sub-items item)) " steps"))
+              header (str icon " " name "  " summary (or steps "") "  ▾")
+              boxes  (concat
+                       (when (:args-text item)
+                         (render-box "Arguments" (:args-text item) width))
+                       (when (:out-text item)
+                         (render-box "Output" (:out-text item) width)))
+              subs   (when (seq (:sub-items item))
+                       (mapcat (fn [sub]
+                                 (map #(str "  " %) (render-item-lines sub (- width 2))))
+                               (:sub-items item)))]
+          (vec (concat [header] boxes subs)))
+        (let [steps (when (seq (:sub-items item))
+                      (str "  ▸ " (count (:sub-items item)) " steps"))]
+          [(str icon " " summary (or steps ""))])))
+
+    :thinking
+    (let [status   (:status item)
+          icon     (if (:focused? item) "›" "▸")
+          label    (if (= :thought status) "Thought" "Thinking…")]
+      (if (:expanded? item)
+        (let [header (str icon " " label "  ▾")
+              inner-w (max 1 (- width 2))
+              body   (when (seq (:text item))
+                       (mapcat #(map (fn [l] (str "  " l))
+                                     (wrap/wrap-text % inner-w))
+                               (str/split-lines (:text item))))]
+          (vec (cons header (or (seq body) [""]))))
+        [(str icon " " label)]))
+
+    :hook
+    (let [status (:status item)
+          icon   (case status :failed "❌" "⚡")
+          label  (case status :running "running…" :ok "ok" :failed "failed" "…")]
+      (if (:expanded? item)
+        (let [header (str (if (:focused? item) "›" icon) " " (:name item) "  " label "  ▾")
+              boxes  (when (seq (str (:out-text item)))
+                       (render-box "Output" (:out-text item) width))]
+          (vec (cons header (or boxes []))))
+        [(str (if (:focused? item) "›" icon) " " (:name item) "  " label)]))
 
     :system
     ;; "⚠ " = 2 cols → inner budget = width - 2
