@@ -4,6 +4,7 @@
             [charm.components.text-input :as ti]
             [charm.message :as msg]
             [eca-bb.chat :as chat]
+            [eca-bb.login :as login]
             [eca-bb.protocol :as protocol]
             [eca-bb.sessions :as sessions]
             [eca-bb.state :as state]))
@@ -13,7 +14,7 @@
 (def ^:private handle-content           chat/handle-content)
 (def ^:private handle-eca-tick          #'state/handle-eca-tick)
 (def ^:private handle-eca-notification  #'state/handle-eca-notification)
-(def ^:private handle-providers-updated #'state/handle-providers-updated)
+(def ^:private handle-providers-updated login/handle-providers-updated)
 
 (defn- base-state []
   {:mode                  :chatting

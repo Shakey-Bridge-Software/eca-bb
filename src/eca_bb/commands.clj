@@ -10,31 +10,10 @@
             [eca-bb.server :as server]
             [eca-bb.sessions :as sessions]
             [eca-bb.picker :as picker]
+            [eca-bb.login :as login]
             [eca-bb.view :as view]))
 
 (declare command-registry)
-
-;; --- Login bootstrap (transient home until login.clj is extracted in step 7) ---
-
-(defn- start-login-cmd [srv pending-message]
-  (program/cmd
-    (fn []
-      (let [providers-result (promise)
-            _                (protocol/providers-list! srv
-                               (fn [r] (deliver providers-result (or (:result r) {}))))]
-        (let [providers (-> (deref providers-result 10000 {:providers []}) :providers)
-              provider  (first (filter #(contains? #{"unauthenticated" "expired"}
-                                                   (get-in % [:auth :status]))
-                                       providers))]
-          (if-not provider
-            {:type :eca-error :error "Login required but no unauthenticated provider found"}
-            (let [login-result (promise)
-                  _            (protocol/providers-login! srv (:id provider) nil
-                                 (fn [r] (deliver login-result (or (:result r) (:error r)))))]
-              {:type            :eca-login-action
-               :provider        (:id provider)
-               :action          (deref login-result 10000 nil)
-               :pending-message pending-message})))))))
 
 ;; --- Command handlers ---
 
@@ -84,7 +63,7 @@
            program/quit-cmd)])
 
 (defn cmd-login [state]
-  [state (start-login-cmd (:server state) nil)])
+  [state (login/start-login-cmd (:server state) nil)])
 
 (def command-registry
   {"/model"    {:doc "Open model picker"                  :handler cmd-open-model-picker}
