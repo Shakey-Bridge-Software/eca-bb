@@ -4,6 +4,7 @@
   are still exercised via state-test for now."
   (:require [clojure.test :refer [deftest is testing]]
             [charm.components.text-input :as ti]
+            [charm.message :as msg]
             [eca-bb.chat :as chat]))
 
 (defn- base-state []
@@ -171,3 +172,78 @@
                   {:method "chat/cleared"
                    :params {:chatId "x" :messages false}})]
       (is (= 1 (count (:items s)))))))
+
+;; --- Block navigation keybindings (Phase B step 5) ---
+
+(defn- with-tools []
+  (assoc (base-state)
+         :mode :ready
+         :focus-path nil
+         :items [{:type :user :text "hi"}
+                 {:type :tool-call :name "read_file" :state :called
+                  :expanded? true :focused? false
+                  :sub-items [{:type :tool-call :name "ls" :state :called
+                               :expanded? false :focused? false}]}
+                 {:type :assistant-text :text "answer"}
+                 {:type :thinking :id "r1" :text "..." :status :thought
+                  :expanded? false :focused? false}
+                 {:type :tool-call :name "write_file" :state :called
+                  :expanded? false :focused? false}]))
+
+(deftest alt-down-jumps-to-next-top-level-test
+  (testing "from no focus, Alt+↓ focuses first top-level focusable block"
+    (let [[s _] (chat/handle-key (with-tools) (msg/key-press :down :alt true))]
+      (is (= [1] (:focus-path s)))))
+
+  (testing "Alt+↓ from sub-item focus jumps to next top-level (not next sub-item)"
+    (let [s0    (chat/sync-focus (assoc (with-tools) :focus-path [1 0]))
+          [s _] (chat/handle-key s0 (msg/key-press :down :alt true))]
+      (is (= [3] (:focus-path s)))))
+
+  (testing "Alt+↓ wraps from last to first"
+    (let [s0    (chat/sync-focus (assoc (with-tools) :focus-path [4]))
+          [s _] (chat/handle-key s0 (msg/key-press :down :alt true))]
+      (is (= [1] (:focus-path s))))))
+
+(deftest alt-up-jumps-to-prev-top-level-test
+  (testing "Alt+↑ from no focus picks last top-level focusable"
+    (let [[s _] (chat/handle-key (with-tools) (msg/key-press :up :alt true))]
+      (is (= [4] (:focus-path s)))))
+
+  (testing "Alt+↑ skips sub-items even when focused on a sub-item"
+    (let [s0    (chat/sync-focus (assoc (with-tools) :focus-path [1 0]))
+          [s _] (chat/handle-key s0 (msg/key-press :up :alt true))]
+      ;; cur-top = [1]; previous top-level is [4] (wraps)
+      (is (= [4] (:focus-path s))))))
+
+(deftest alt-g-focuses-first-block-test
+  (testing "Alt+g focuses first focusable block regardless of current focus"
+    (let [s0    (chat/sync-focus (assoc (with-tools) :focus-path [4]))
+          [s _] (chat/handle-key s0 (msg/key-press "g" :alt true))]
+      (is (= [1] (:focus-path s))))))
+
+(deftest alt-shift-g-focuses-last-block-test
+  (testing "Alt+G focuses last focusable block (sub-item if final top-level is expanded)"
+    (let [[s _] (chat/handle-key (with-tools) (msg/key-press "G" :alt true))]
+      ;; with-tools expands index 1 with one sub-item; last block is [4]
+      (is (= [4] (:focus-path s))))))
+
+(deftest alt-c-collapses-all-test
+  (testing "Alt+c sets :expanded? false on every focusable item and sub-item"
+    (let [[s _] (chat/handle-key (with-tools) (msg/key-press "c" :alt true))]
+      (is (every? #(or (not (#{:tool-call :thinking :hook} (:type %)))
+                       (false? (:expanded? %)))
+                  (:items s))))))
+
+(deftest alt-o-expands-all-test
+  (testing "Alt+o sets :expanded? true on every focusable item and sub-item"
+    (let [[s _] (chat/handle-key (with-tools) (msg/key-press "o" :alt true))]
+      (is (every? #(or (not (#{:tool-call :thinking :hook} (:type %)))
+                       (true? (:expanded? %)))
+                  (:items s))))))
+
+(deftest block-nav-noop-on-empty-items-test
+  (testing "Alt+↓ on empty items returns state unchanged"
+    (let [s0 (assoc (base-state) :items [])
+          [s _] (chat/handle-key s0 (msg/key-press :down :alt true))]
+      (is (nil? (:focus-path s))))))

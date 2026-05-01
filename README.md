@@ -57,7 +57,10 @@ Typing `/` in an empty input opens an autocomplete picker for these commands.
 | Key | Action |
 |---|---|
 | `Enter` | Send message (in `:ready`) / toggle expanded block (when focused) |
-| `Tab` / `Shift+Tab` | Cycle focus through chat blocks |
+| `Tab` / `Shift+Tab` | Cycle focus through chat blocks (sub-items included) |
+| `Alt+↑` / `Alt+↓` | Jump to previous / next top-level block (skips sub-items) |
+| `Alt+g` / `Alt+G` | Focus first / last focusable block |
+| `Alt+c` / `Alt+o` | Collapse all / expand all focusable blocks |
 | `↑` / `↓` | Navigate focus when active; recall input history when not |
 | `Esc` | Cancel a running prompt; cancel a picker; clear focus |
 | `y` / `n` / `Y` | Approve / reject / approve-and-trust a tool call |
@@ -65,6 +68,8 @@ Typing `/` in an empty input opens an autocomplete picker for these commands.
 | `Mouse wheel` | Scroll (3 lines per tick) |
 | `Ctrl+C` | Quit |
 | `Ctrl+L` | Open model picker |
+
+Alt-prefixed bindings are supported on iTerm2, Ghostty, Kitty, and modern tmux (with `xterm-keys on`). Terminal.app on macOS sends Alt as ESC-prefix by default — set "Use Option as Meta key" in Profiles → Keyboard for Alt to register as a modifier.
 
 ## Architecture
 

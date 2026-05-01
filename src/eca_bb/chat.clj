@@ -440,11 +440,73 @@
       :up   [(update state :scroll-offset #(min max-offset (+ % 3))) nil]
       :down [(update state :scroll-offset #(max 0 (- % 3))) nil])))
 
+(defn- top-level-paths
+  "Filter focusable-paths to top-level entries only (`[[i] ...]`),
+  used for Alt+↑/↓ block-jumps that skip sub-items."
+  [items]
+  (filterv #(= 1 (count %)) (focusable-paths items)))
+
+(defn- jump-top-level [state direction]
+  (let [paths (top-level-paths (:items state))]
+    (if (empty? paths)
+      [state nil]
+      (let [cur     (:focus-path state)
+            ;; Map sub-item focus to its top-level parent before stepping.
+            cur-top (when cur [(first cur)])
+            n       (count paths)
+            cur-idx (when cur-top (first (keep-indexed #(when (= cur-top %2) %1) paths)))
+            next    (case direction
+                      :forward  (if (nil? cur-idx) (first paths) (nth paths (mod (inc cur-idx) n)))
+                      :backward (if (nil? cur-idx) (last paths)  (nth paths (mod (dec cur-idx) n))))]
+        [(-> state (assoc :focus-path next) sync-focus view/rebuild-lines) nil]))))
+
+(defn- focus-edge [state edge]
+  (let [paths (focusable-paths (:items state))]
+    (if (empty? paths)
+      [state nil]
+      [(-> state
+           (assoc :focus-path (case edge :first (first paths) :last (last paths)))
+           sync-focus
+           view/rebuild-lines)
+       nil])))
+
+(defn- expandable? [item]
+  (#{:tool-call :thinking :hook} (:type item)))
+
+(defn- toggle-all-expanded [state expanded?]
+  (let [walk (fn walk [item]
+               (cond-> item
+                 (expandable? item)   (assoc :expanded? expanded?)
+                 (:sub-items item)    (update :sub-items #(mapv walk %))))
+        items' (mapv walk (:items state))]
+    [(-> state (assoc :items items') view/rebuild-lines) nil]))
+
 (defn handle-key
   "Dispatch keypresses + mouse-wheel events when mode is :ready or :chatting.
   Caller guarantees mode is :ready or :chatting."
   [state msg]
   (cond
+    ;; --- Block navigation (Alt-prefixed; safe alongside text input) ---
+    (and (msg/key-press? msg) (msg/key-match? msg "alt+up"))
+    (jump-top-level state :backward)
+
+    (and (msg/key-press? msg) (msg/key-match? msg "alt+down"))
+    (jump-top-level state :forward)
+
+    ;; Match raw key chars so capital G works whether or not the terminal
+    ;; sets the :shift modifier flag (varies between iTerm / Ghostty / tmux).
+    (and (msg/key-press? msg) (= "g" (:key msg)) (:alt msg) (not (:ctrl msg)))
+    (focus-edge state :first)
+
+    (and (msg/key-press? msg) (= "G" (:key msg)) (:alt msg) (not (:ctrl msg)))
+    (focus-edge state :last)
+
+    (and (msg/key-press? msg) (msg/key-match? msg "alt+c"))
+    (toggle-all-expanded state false)
+
+    (and (msg/key-press? msg) (msg/key-match? msg "alt+o"))
+    (toggle-all-expanded state true)
+
     ;; --- Focus navigation ---
     (and (msg/key-press? msg) (msg/key-match? msg :tab) (not (:shift msg)) (not (:alt msg)))
     (focus-paths-cycle state :forward)
