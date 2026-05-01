@@ -14,6 +14,7 @@
                                 (require '[eca-bb.lifecycle-test])
                                 (require '[eca-bb.protocol-test])
                                 (require '[eca-bb.view-test])
+                                (require '[eca-bb.view.blocks-test])
                                 (require '[eca-bb.state-test])
                                 (require '[eca-bb.sessions-test])
                                 (require '[eca-bb.upgrade-test])
@@ -22,6 +23,7 @@
                                                               'eca-bb.lifecycle-test
                                                               'eca-bb.protocol-test
                                                               'eca-bb.view-test
+                                                              'eca-bb.view.blocks-test
                                                               'eca-bb.state-test
                                                               'eca-bb.sessions-test
                                                               'eca-bb.upgrade-test)]
