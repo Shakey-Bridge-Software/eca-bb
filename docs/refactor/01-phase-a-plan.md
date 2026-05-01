@@ -188,3 +188,89 @@ Each step ends with `bb test` green and integration test green.
 - New feature work (MCP, queryContext, queryCommands, diff, log viewer).
 - Block-navigation keybindings.
 - `bb.edn` test-namespace auto-discovery (low value at 6–9 test-ns scale).
+
+---
+
+## Outcome
+
+Status: **complete**. 73/73 tests green at every commit. No behaviour regressions beyond two intentional minor edge cases (PgUp/PgDn during `:login` is now no-op; typing in `:approving` no longer reaches the input — both irrelevant in practice).
+
+### Final LOC vs targets
+
+| File | Target | Final | Notes |
+|---|---|---|---|
+| `state.clj` | ≤ 250 | **272** | Overshot by 22. Five `handle-eca-notification` cases (`$/progress`, `$/showMessage`, `config/updated`, `chat/opened`, `chat/cleared`) stayed inline — heterogeneous and not worth splitting further. The 250 figure was below the natural floor anyway: sibling editors land at 289 (eca-nvim `state.lua`) and 299 (eca-desktop `chat-state.ts`). |
+| `chat.clj` | ≤ 500 | **462** | Includes content handlers, focus helpers, `send-chat-prompt!`, `chat/handle-key`, `chat/handle-approval-key`, and `handle-content-received`. Cohesive — all chat-domain. |
+| `commands.clj` | ~150 | **114** | Smaller than estimate: `printable-char?` migrated to `picker.clj` mid-execution (see decisions below). |
+| `picker.clj` | ~150 | **145** | Includes overlay helpers + `handle-key` + `printable-char?`. |
+| `login.clj` | ~200 | **175** | All cmd builders, `handle-providers-updated`, `handle-eca-login-action`, `handle-eca-login-complete`, `handle-key`. |
+| `sessions.clj` | ~80 | **56** | Persistence (kept) + 3 cmd builders absorbed. |
+| `view.clj` | unchanged | **265** | +`rebuild-lines` (8 LOC). |
+
+Project total: 1975 LOC across 12 nses. Sibling comparison: eca-nvim 7000, eca-emacs 9903, eca-desktop 6185 — eca-bb is the smallest by 3-5×, expected for a TUI client.
+
+### Step sequence (actual)
+
+The plan listed 8 steps; execution produced 10 commits. Renumbering reflects two mid-flight reorderings:
+
+1. Pre-refactor test hardening — 7 new deftests (approval `y`/`n`/`Y`, Enter-submit, `:window-size`, Ctrl+C).
+2. `rebuild-lines` → `view.clj`.
+3. Extract `chat.clj` helpers + `handle-content`.
+4. Extract `picker.clj` (helpers only — no key dispatch yet).
+5. Extend `sessions.clj` with chat-list/open/delete cmds.
+6. Replace `commands.clj` stub with real registry + dispatch.
+7. Extract `login.clj` (cmd builders + notification handler + `:login` key dispatch + runtime arms).
+8. Extract chat key dispatch — `chat/handle-key` + `chat/handle-approval-key`. Rewrote `update-state` to dispatcher contract.
+9. Extract `picker/handle-key` (5 :picking arms; command-picker selection stayed in `state.clj` — see below).
+10. Bonus: moved `chat/contentReceived` notification handler to `chat.clj`. Pushed `state.clj` from 314 to 272.
+
+Commits 1-6 were bundled into one git commit; 7, 8, 9, 10 are separate.
+
+### Plan revisions during execution
+
+**Order change.** Original plan had login → picker → commands → sessions. User asked to bring `commands.clj` forward. New order picker → sessions → commands → login worked because `commands.clj` could ship with `cmd-login` calling a transient copy of `start-login-cmd` (later moved to `login.clj` in step 7).
+
+**`shutdown-cmd` placement.** Plan said keep in `state.clj`. `commands.clj/cmd-quit` originally needed it but couldn't `require` `state` (one-way rule). Resolution: inlined the 4-line shutdown sequence in `cmd-quit`; `state.clj` keeps an identical Ctrl+C path. 4 LOC duplication, no cycle.
+
+**`finalize-handler-result` placement.** Plan said keep in `state.clj` (called from both dispatch-command and command-picker selection arm). Reality: ended up duplicated as a private fn in `commands.clj/dispatch-command` and `commands.clj/run-handler-from-picker`. Cleaner than exposing a shared util.
+
+**`printable-char?` placement.** Plan implicitly put it in `commands.clj` (where it lived). When extracting picker key dispatch in step 9, picker needed `printable-char?` for the filter arm — but `picker → commands` would create a `picker → commands → login → chat` cycle. Resolution: moved `printable-char?` from `commands.clj` to `picker.clj` (which is a leaf-ish ns). State.clj and commands.clj now reference `picker/printable-char?`.
+
+**Command-picker selection stayed in dispatcher.** `picker/handle-key` returns `[state nil]` for the `:command` kind on Enter; `state.clj`'s dispatcher catches that case above the picker delegation and calls `commands/run-handler-from-picker`. Same cycle-avoidance reason — `picker` cannot import `commands`.
+
+**`login/handle-key` `:else` clause.** Original draft had `:else [state nil]`, which dropped typed characters into login fields. Fix: forwarded to `text-input-update` so typing into login prompts still works. Behaviour-preserving.
+
+**`chat.clj` ceiling raised.** Plan upper-bounded chat at 500 LOC during the review pass. Final 462 — under. The bonus `handle-content-received` extraction in step 10 added 50 LOC without crossing.
+
+### Dep graph (final)
+
+```
+core ──► state, view
+state ──► chat, picker, login, commands, sessions, server, protocol, upgrade, view
+commands ──► login, picker, sessions, server, protocol, view
+login ──► chat, protocol, view
+chat ──► protocol, sessions, view
+picker ──► protocol, sessions
+sessions ──► protocol
+view ──► wrap
+```
+
+Acyclic. The cycle hazards encountered (`chat → commands → login → chat`, `picker → commands → login → chat`) were all solved by keeping integration arms in the dispatcher rather than the feature ns.
+
+### Things the plan got right
+
+- Dispatcher contract (mode-agnostic events → global keys → per-mode delegation) survived contact with reality unchanged.
+- Test hardening *before* the refactor (step 1) caught zero issues during execution but provided regression confidence at every step.
+- Mapping line ranges from `grep -nE '^\(defn'` produced LOC estimates within ±15% of actuals on every file except `state.clj`.
+- One-way dep direction from `state` outward held throughout — no back-references created.
+
+### Things the plan missed
+
+- The `state.clj` 250-LOC target was below the natural floor for "central state ns" in this ecosystem (~280-300 across siblings). 272 is a better outcome than artificially shrinking further.
+- `printable-char?` shared-utility need wasn't anticipated.
+- `login/handle-key` `:else` text-input-fallthrough requirement wasn't explicit (silent edge case caught during review of step 7).
+- The `picker → commands` cycle hazard wasn't on the dep-graph diagram; only surfaced during step 9.
+
+### Phase B inputs
+
+The deferred items (MCP, queryContext, queryCommands, diff, log viewer, view split, block-navigation keybindings) remain. New input from this execution: `chat.clj` is approaching its self-imposed 500 LOC ceiling — if Phase B work pushes it past 600, the natural seam is `chat.clj` (handlers + state) + `chat_keys.clj` (key dispatch). Sibling editors don't make this split, so it would be premature today.
