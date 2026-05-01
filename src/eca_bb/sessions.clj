@@ -1,6 +1,8 @@
 (ns eca-bb.sessions
   (:require [clojure.edn :as edn]
-            [clojure.java.io :as io]))
+            [clojure.java.io :as io]
+            [charm.program :as program]
+            [eca-bb.protocol :as protocol]))
 
 (defn sessions-path []
   (str (System/getProperty "user.home") "/.cache/eca/eca-bb-sessions.edn"))
@@ -27,3 +29,28 @@
                    (dissoc existing workspace))]
     (io/make-parents path)
     (spit path (pr-str updated))))
+
+;; --- charm/program cmd builders for chat-list/open/delete ---
+
+(defn delete-chat-cmd [srv chat-id]
+  (program/cmd
+    (fn []
+      (protocol/delete-chat! srv chat-id (fn [_] nil))
+      nil)))
+
+(defn open-chat-cmd [srv chat-id]
+  (program/cmd
+    (fn []
+      (protocol/open-chat! srv chat-id (fn [_] nil))
+      nil)))
+
+(defn list-chats-cmd [srv]
+  (program/cmd
+    (fn []
+      (let [p (promise)]
+        (protocol/list-chats! srv
+          (fn [r]
+            (deliver p {:chats  (or (get-in r [:result :chats]) [])
+                        :error? (boolean (:error r))})))
+        (let [{:keys [chats error?]} (deref p 10000 {:chats [] :error? true})]
+          {:type :chat-list-loaded :chats chats :error? error?})))))

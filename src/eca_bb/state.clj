@@ -9,103 +9,13 @@
             [eca-bb.protocol :as protocol]
             [eca-bb.sessions :as sessions]
             [eca-bb.upgrade :as upgrade]
-            [eca-bb.view :as view]))
+            [eca-bb.view :as view]
+            [eca-bb.chat :as chat]
+            [eca-bb.picker :as picker]
+            [eca-bb.commands :as commands]))
 
 ;; Expose last-known state for nREPL inspection
 (def debug-state (atom nil))
-
-;; --- State helpers ---
-
-(defn- rebuild-lines [state]
-  (assoc state :chat-lines
-         (view/rebuild-chat-lines (:items state) (:current-text state) (:width state))))
-
-(defn- flush-current-text [state]
-  (if (seq (:current-text state))
-    (-> state
-        (update :items conj {:type :assistant-text :text (:current-text state)})
-        (assoc :current-text ""))
-    state))
-
-(defn- upsert-tool-call [state tool-call]
-  (let [id     (:id tool-call)
-        merged (merge (get-in state [:tool-calls id]) tool-call)]
-    (-> state
-        (assoc-in [:tool-calls id] merged)
-        (update :items
-                (fn [items]
-                  (if (some #(= id (:id %)) items)
-                    (mapv (fn [item]
-                            (if (= id (:id item))
-                              ;; Protect interactive state from being clobbered by incoming events
-                              (let [protected (select-keys item [:expanded? :focused? :sub-items])]
-                                (merge item {:type :tool-call}
-                                       (dissoc tool-call :expanded? :focused? :sub-items)
-                                       protected))
-                              item))
-                          items)
-                    (let [spawn? (= "eca__spawn_agent" (:name merged))
-                          base   (cond-> (assoc merged :type :tool-call
-                                                       :expanded? false :focused? false)
-                                   spawn? (assoc :sub-items []))]
-                      (conj items base))))))))
-
-(defn- content->item [params]
-  (let [content (:content params)]
-    (case (:type content)
-      "text"
-      {:type :assistant-text :text (:text content)}
-
-      ("toolCallPrepare" "toolCallRunning" "toolCallRun" "toolCalled" "toolCallRejected")
-      {:type :tool-call :id (:id content) :name (:name content)
-       :server (:server content) :summary (:summary content)
-       :state (case (:type content)
-                "toolCallPrepare"  :preparing
-                "toolCallRun"      :run
-                "toolCallRunning"  :running
-                "toolCalled"       :called
-                "toolCallRejected" :rejected)
-       :expanded? false :focused? false}
-
-      "reasonStarted"
-      {:type :thinking :id (:id content) :text "" :status :thinking
-       :expanded? false :focused? false}
-
-      nil)))
-
-(defn- focusable-paths [items]
-  (into []
-    (mapcat
-      (fn [[i item]]
-        (when (#{:tool-call :thinking :hook} (:type item))
-          (cons [i]
-            (when (:expanded? item)
-              (keep-indexed
-                (fn [j sub]
-                  (when (#{:tool-call :thinking :hook} (:type sub))
-                    [i j]))
-                (or (:sub-items item) []))))))
-      (map-indexed vector items))))
-
-(defn- sync-focus [state]
-  (let [path   (:focus-path state)
-        items  (mapv (fn [item]
-                       (cond-> (assoc item :focused? false)
-                         (:sub-items item)
-                         (update :sub-items #(mapv (fn [s] (assoc s :focused? false)) %))))
-                     (:items state))
-        items' (if path
-                 (let [[i j] path]
-                   (if j
-                     (assoc-in items [i :sub-items j :focused?] true)
-                     (assoc-in items [i :focused?] true)))
-                 items)]
-    (assoc state :items items')))
-
-(defn- register-subagent [state tool-id subagent-chat-id]
-  (if-let [idx (first (keep-indexed #(when (= tool-id (:id %2)) %1) (:items state)))]
-    (assoc-in state [:subagent-chats subagent-chat-id] idx)
-    state))
 
 ;; --- Commands ---
 
@@ -128,29 +38,6 @@
     (program/cmd (fn [] (try (protocol/shutdown! srv) (catch Exception _)) nil))
     (program/cmd (fn [] (server/shutdown! srv) nil))
     program/quit-cmd))
-
-(defn- delete-chat-cmd [srv chat-id]
-  (program/cmd
-    (fn []
-      (protocol/delete-chat! srv chat-id (fn [_] nil))
-      nil)))
-
-(defn- open-chat-cmd [srv chat-id]
-  (program/cmd
-    (fn []
-      (protocol/open-chat! srv chat-id (fn [_] nil))
-      nil)))
-
-(defn- list-chats-cmd [srv]
-  (program/cmd
-    (fn []
-      (let [p (promise)]
-        (protocol/list-chats! srv
-          (fn [r]
-            (deliver p {:chats  (or (get-in r [:result :chats]) [])
-                        :error? (boolean (:error r))})))
-        (let [{:keys [chats error?]} (deref p 10000 {:chats [] :error? true})]
-          {:type :chat-list-loaded :chats chats :error? error?})))))
 
 (defn- start-login-cmd [srv pending-message]
   (program/cmd
@@ -194,158 +81,6 @@
             (= "done" (:action r)) {:type :eca-login-complete :pending-message pending-message}
             :else                  {:type :eca-error :error (str "Login failed: " r)}))))))
 
-;; --- Protocol send helpers ---
-
-(defn- send-chat-prompt! [srv chat-id text opts]
-  (protocol/chat-prompt!
-    srv
-    (cond-> {:message text}
-      chat-id       (assoc :chat-id chat-id)
-      (:model opts) (assoc :model (:model opts))
-      (:agent opts) (assoc :agent (:agent opts)))
-    (fn [result]
-      (when-let [new-id (:chat-id result)]
-        (sessions/save-chat-id! (:workspace opts) new-id))
-      (.put (:queue srv)
-            {:type    :eca-prompt-response
-             :chat-id (:chat-id result)
-             :model   (:model result)
-             :status  (:status result)}))))
-
-;; --- ECA content handler ---
-
-(defn- handle-content [state params]
-  (let [content (:content params)]
-    (case (:type content)
-      "text"
-      (-> state
-          (update :current-text str (:text content))
-          rebuild-lines)
-
-      "progress"
-      (if (= "finished" (:state content))
-        (-> state
-            flush-current-text
-            (assoc :mode :ready :echo-pending false)
-            (update :input ti/focus)
-            rebuild-lines)
-        state)
-
-      "toolCallPrepare"
-      (if (and (= "eca" (:server content)) (= "task" (:name content)))
-        state
-        (-> state
-            flush-current-text
-            (upsert-tool-call {:id             (:id content)
-                               :name           (:name content)
-                               :server         (:server content)
-                               :summary        (:summary content)
-                               :arguments-text (:argumentsText content)
-                               :state          :preparing})
-            rebuild-lines))
-
-      "toolCallRun"
-      (let [{:keys [id name server summary arguments manualApproval subagentDetails]} content]
-        (if (and (= "eca" server) (= "task" name))
-          state
-          (let [trust?    (or (:trust state)
-                              (contains? (:session-trusted-tools state) name))
-                args-text (when arguments
-                            (try (json/generate-string arguments)
-                                 (catch Exception _ (pr-str arguments))))
-                tool      {:id id :name name :server server
-                           :summary summary :arguments arguments
-                           :args-text args-text :state :run}]
-            (if (and manualApproval (not trust?))
-              (let [s' (-> state
-                           (upsert-tool-call tool)
-                           (assoc :mode :approving
-                                  :pending-approval {:chat-id (:chat-id state) :tool-call-id id})
-                           rebuild-lines)]
-                (cond-> s'
-                  subagentDetails
-                  (register-subagent id (:subagentChatId subagentDetails))))
-              (do
-                (protocol/approve-tool! (:server state) (:chat-id state) id)
-                (let [s' (-> state (upsert-tool-call tool) rebuild-lines)]
-                  (cond-> s'
-                    subagentDetails
-                    (register-subagent id (:subagentChatId subagentDetails)))))))))
-
-      "toolCallRunning"
-      (-> state
-          (upsert-tool-call {:id        (:id content) :name (:name content)
-                             :server    (:server content) :summary (:summary content)
-                             :arguments (:arguments content) :state :running})
-          rebuild-lines)
-
-      "toolCalled"
-      (let [{:keys [id name server summary arguments output error]} content
-            out-text (when (seq (str output))
-                       (if (> (count output) 8192)
-                         (str (subs output 0 8192) "\n[truncated]")
-                         output))]
-        (-> state
-            (upsert-tool-call {:id id :name name :server server
-                               :summary summary :arguments arguments
-                               :state :called :error? error :out-text out-text})
-            rebuild-lines))
-
-      "toolCallRejected"
-      (-> state
-          (upsert-tool-call {:id        (:id content) :name (:name content)
-                             :server    (:server content) :summary (:summary content)
-                             :arguments (:arguments content) :state :rejected})
-          rebuild-lines)
-
-      "reasonStarted"
-      (-> state
-          (update :items conj {:type :thinking :id (:id content) :text ""
-                               :status :thinking :expanded? false :focused? false})
-          rebuild-lines)
-
-      "reasonText"
-      (-> state
-          (update :items
-                  (fn [items]
-                    (mapv #(if (and (= :thinking (:type %)) (= (:id content) (:id %)))
-                             (update % :text str (:text content))
-                             %)
-                          items)))
-          rebuild-lines)
-
-      "reasonFinished"
-      (-> state
-          (update :items
-                  (fn [items]
-                    (mapv #(if (and (= :thinking (:type %)) (= (:id content) (:id %)))
-                             (assoc % :status :thought)
-                             %)
-                          items)))
-          rebuild-lines)
-
-      "hookActionStarted"
-      (-> state
-          (update :items conj {:type :hook :id (:id content) :name (:name content)
-                               :status :running :out-text nil :expanded? false :focused? false})
-          rebuild-lines)
-
-      "hookActionFinished"
-      (-> state
-          (update :items
-                  (fn [items]
-                    (mapv #(if (and (= :hook (:type %)) (= (:id content) (:id %)))
-                             (assoc % :status (keyword (:status content))
-                                      :out-text (:output content))
-                             %)
-                          items)))
-          rebuild-lines)
-
-      "usage"
-      (assoc state :usage content)
-
-      state)))
-
 ;; --- Login notification handler ---
 
 (defn- handle-providers-updated [state provider-status]
@@ -363,7 +98,7 @@
                           (update :input ti/blur))]
         [new-state (when pending
                      (program/cmd (fn []
-                                    (send-chat-prompt! srv nil pending opts)
+                                    (chat/send-chat-prompt! srv nil pending opts)
                                     nil)))])
       [state nil])))
 
@@ -385,10 +120,10 @@
         [(-> state
              (update-in [:items parent-idx :sub-items]
                         (fn [subs]
-                          (if-let [item (content->item params)]
+                          (if-let [item (chat/content->item params)]
                             (conj (or subs []) item)
                             (or subs []))))
-             rebuild-lines)
+             view/rebuild-lines)
          nil]
         (if (= "user" (:role params))
           (if (= "text" (:type content))
@@ -397,9 +132,9 @@
               ;; never typed by the human — render as assistant text, not user input.
               (:parentChatId params)
               [(-> state
-                   flush-current-text
+                   chat/flush-current-text
                    (update :items conj {:type :assistant-text :text (or (:text content) "")})
-                   rebuild-lines)
+                   view/rebuild-lines)
                nil]
 
               (:echo-pending state)
@@ -407,12 +142,12 @@
 
               :else
               [(-> state
-                   flush-current-text
+                   chat/flush-current-text
                    (update :items conj {:type :user :text (or (:text content) "")})
-                   rebuild-lines)
+                   view/rebuild-lines)
                nil])
             [state nil])
-          [(handle-content state params) nil])))
+          [(chat/handle-content state params) nil])))
 
     "providers/updated"
     (handle-providers-updated state (:params notification))
@@ -431,7 +166,7 @@
     (let [text (or (get-in notification [:params :message]) "Server message")]
       [(-> state
            (update :items conj {:type :system :text text})
-           rebuild-lines)
+           view/rebuild-lines)
        nil])
 
     "config/updated"
@@ -445,7 +180,7 @@
                  (contains? chat :selectVariant) (assoc :selected-variant (:selectVariant chat))
                  (:welcomeMessage chat)          (update :items conj {:type :assistant-text
                                                                        :text (:welcomeMessage chat)}))]
-      [(if (:welcomeMessage chat) (rebuild-lines s') s') nil])
+      [(if (:welcomeMessage chat) (view/rebuild-lines s') s') nil])
 
     "chat/opened"
     (let [{:keys [chatId title]} (:params notification)]
@@ -475,7 +210,7 @@
              (update :items conj {:type :system
                                    :text (str "ECA disconnected: " (:error m))})
              (update :input ti/focus)
-             rebuild-lines)
+             view/rebuild-lines)
          nil]
 
         (= :eca-prompt-response (:type m))
@@ -494,162 +229,6 @@
     [state nil]
     msgs))
 
-;; --- Picker helpers ---
-
-(defn- item-display [kind item]
-  (case kind
-    :session (first item)
-    :command (str (first item) "  —  " (second item))
-    item))
-
-(defn- open-picker [state kind]
-  (let [items (if (= :model kind) (:available-models state) (:available-agents state))]
-    (if (empty? items)
-      state
-      (-> state
-          (assoc :mode :picking
-                 :picker {:kind     kind
-                          :list     (cl/item-list items :height 8)
-                          :all      items
-                          :filtered items
-                          :query    ""})
-          (update :input ti/reset)))))
-
-(defn- open-session-picker [state session-pairs]
-  (let [labels (mapv first session-pairs)]
-    (-> state
-        (assoc :mode :picking
-               :picker {:kind     :session
-                        :list     (cl/item-list labels :height 8)
-                        :all      session-pairs
-                        :filtered session-pairs
-                        :query    ""})
-        (update :input ti/reset))))
-
-(defn- filter-picker [state ch]
-  (let [query    (str (get-in state [:picker :query]) ch)
-        kind     (get-in state [:picker :kind])
-        all      (get-in state [:picker :all])
-        filtered (filterv #(str/includes? (str/lower-case (item-display kind %))
-                                           (str/lower-case query))
-                           all)
-        labels   (mapv #(item-display kind %) filtered)]
-    (-> state
-        (assoc-in [:picker :query] query)
-        (assoc-in [:picker :filtered] filtered)
-        (update-in [:picker :list] cl/set-items labels))))
-
-(defn- unfilter-picker [state]
-  (let [query    (get-in state [:picker :query])
-        new-q    (if (seq query) (subs query 0 (dec (count query))) "")
-        kind     (get-in state [:picker :kind])
-        all      (get-in state [:picker :all])
-        filtered (if (seq new-q)
-                   (filterv #(str/includes? (str/lower-case (item-display kind %))
-                                             (str/lower-case new-q))
-                              all)
-                   all)
-        labels   (mapv #(item-display kind %) filtered)]
-    (-> state
-        (assoc-in [:picker :query] new-q)
-        (assoc-in [:picker :filtered] filtered)
-        (update-in [:picker :list] cl/set-items labels))))
-
-(declare command-registry)
-
-;; --- Command handlers ---
-
-(defn- cmd-open-model-picker [state]
-  (if (seq (:available-models state))
-    [(open-picker state :model) nil]
-    [(-> state
-         (update :items conj {:type :system :text "⚠ No models available"})
-         rebuild-lines)
-     nil]))
-
-(defn- cmd-open-agent-picker [state]
-  (if (seq (:available-agents state))
-    [(open-picker state :agent) nil]
-    [(-> state
-         (update :items conj {:type :system :text "⚠ No agents available"})
-         rebuild-lines)
-     nil]))
-
-(defn- cmd-new-chat [state]
-  (if-let [old-chat-id (:chat-id state)]
-    (do
-      (sessions/save-chat-id! (get-in state [:opts :workspace]) nil)
-      [(-> state
-           (assoc :items [] :chat-lines [] :chat-id nil :chat-title nil :scroll-offset 0)
-           (update :input #(-> % ti/reset ti/focus)))
-       (delete-chat-cmd (:server state) old-chat-id)])
-    [(update state :input #(-> % ti/reset ti/focus)) nil]))
-
-(defn- cmd-list-sessions [state]
-  [(update state :input ti/reset) (list-chats-cmd (:server state))])
-
-(defn- cmd-clear-chat [state]
-  [(assoc state :items [] :chat-lines [] :scroll-offset 0) nil])
-
-(defn- cmd-show-help [state]
-  (let [lines (map (fn [[name {:keys [doc]}]] (str name "  —  " doc))
-                   (sort-by key command-registry))
-        text  (str/join "\n" (into ["Available commands:"] lines))]
-    [(update state :items conj {:type :system :text text}) nil]))
-
-(defn- cmd-quit [state]
-  [state (shutdown-cmd (:server state))])
-
-(defn- cmd-login [state]
-  [state (start-login-cmd (:server state) nil)])
-
-(def command-registry
-  {"/model"    {:doc "Open model picker"                  :handler cmd-open-model-picker}
-   "/agent"    {:doc "Open agent picker"                  :handler cmd-open-agent-picker}
-   "/new"      {:doc "Start a fresh chat"                 :handler cmd-new-chat}
-   "/sessions" {:doc "Browse and resume previous chats"   :handler cmd-list-sessions}
-   "/clear"    {:doc "Clear chat display (local only)"    :handler cmd-clear-chat}
-   "/help"     {:doc "Show available commands"            :handler cmd-show-help}
-   "/quit"     {:doc "Exit eca-bb"                        :handler cmd-quit}
-   "/login"    {:doc "Manually trigger provider login"    :handler cmd-login}})
-
-(defn- open-command-picker [state]
-  (let [all (mapv (fn [[name {:keys [doc]}]] [name doc])
-                  (sort-by key command-registry))]
-    (-> state
-        (assoc :mode :picking
-               :picker {:kind     :command
-                        :query    ""
-                        :list     (cl/item-list (mapv #(item-display :command %) all) :height 8)
-                        :all      all
-                        :filtered all})
-        (update :input ti/reset))))
-
-(defn- finalize-handler-result [new-state cmd]
-  [(cond-> (rebuild-lines new-state)
-     (= :ready (:mode new-state)) (update :input #(-> % ti/reset ti/focus)))
-   cmd])
-
-(defn- dispatch-command [state text]
-  (if-let [{:keys [handler]} (get command-registry text)]
-    (let [[new-state cmd] (handler state)]
-      (finalize-handler-result new-state cmd))
-    [(-> state
-         (update :items conj {:type :system
-                               :text (str "⚠ Unknown command: " text
-                                          "  (type /help to see available commands)")})
-         (update :input #(-> % ti/reset ti/focus))
-         rebuild-lines)
-     nil]))
-
-(defn- printable-char? [msg]
-  (and (msg/key-press? msg)
-       (string? (:key msg))
-       (= 1 (count (:key msg)))
-       (not (:ctrl msg))
-       (not (:alt msg))))
-
-;; --- Init ---
 
 (defn- initial-state [srv opts]
   {:mode                  :connecting
@@ -693,7 +272,7 @@
           warn      (upgrade/check-version binary)
           init-s    (cond-> (initial-state srv opts)
                       warn (-> (update :items conj {:type :system :text warn})
-                               rebuild-lines))]
+                               view/rebuild-lines))]
       (server/start-reader! srv)
       [init-s (init-cmd srv workspace)])))
 
@@ -708,7 +287,7 @@
       (= :window-size (:type msg))
       [(-> state
            (assoc :width (:width msg) :height (:height msg))
-           rebuild-lines)
+           view/rebuild-lines)
        nil]
 
       (= :eca-initialized (:type msg))
@@ -720,7 +299,7 @@
            (assoc :mode :ready)
            (update :items conj {:type :assistant-text :text (str "Error: " (:error msg))})
            (update :input ti/focus)
-           rebuild-lines)
+           view/rebuild-lines)
        nil]
 
       (= :eca-tick (:type msg))
@@ -737,13 +316,13 @@
                (assoc :mode :ready)
                (update :input ti/focus)
                (update :items conj {:type :system :text "Login failed: timed out"})
-               rebuild-lines)
+               view/rebuild-lines)
            nil]
 
           (= "done" (:action action))
           (do
             (when pending
-              (send-chat-prompt! (:server state) nil pending (:opts state)))
+              (chat/send-chat-prompt! (:server state) nil pending (:opts state)))
             [(-> state (assoc :mode :chatting) (dissoc :login) (update :input ti/blur)) nil])
 
           :else
@@ -764,7 +343,7 @@
       (= :eca-login-complete (:type msg))
       (let [pending (:pending-message msg)]
         (when pending
-          (send-chat-prompt! (:server state) nil pending (:opts state)))
+          (chat/send-chat-prompt! (:server state) nil pending (:opts state)))
         [(-> state (assoc :mode :chatting) (dissoc :login) (update :input ti/blur)) nil])
 
       ;; Session list loaded from chat/list response
@@ -776,9 +355,9 @@
                                  cnt (when messageCount (str messageCount " msgs"))]
                              [(str/join "  •  " (remove nil? [t cnt])) id]))
                          chats)
-            s'     (open-session-picker state pairs)]
+            s'     (picker/open-session-picker state pairs)]
         [(if error?
-           (-> s' (update :items conj {:type :system :text "⚠ Could not load sessions"}) rebuild-lines)
+           (-> s' (update :items conj {:type :system :text "⚠ Could not load sessions"}) view/rebuild-lines)
            s')
          nil])
 
@@ -790,7 +369,7 @@
       (and (msg/key-press? msg)
            (msg/key-match? msg "ctrl+l")
            (= :ready (:mode state)))
-      (cmd-open-model-picker state)
+      (commands/cmd-open-model-picker state)
 
       ;; Focus navigation: Tab/Shift+Tab cycles through focusable items in render order
       (and (msg/key-press? msg)
@@ -798,7 +377,7 @@
            (not (:shift msg))
            (not (:alt msg))
            (#{:ready :chatting} (:mode state)))
-      (let [paths (focusable-paths (:items state))]
+      (let [paths (chat/focusable-paths (:items state))]
         (if (empty? paths)
           [state nil]
           (let [cur     (:focus-path state)
@@ -806,14 +385,14 @@
                 next    (if (nil? cur-idx)
                           (first paths)
                           (nth paths (mod (inc cur-idx) (count paths))))]
-            [(-> state (assoc :focus-path next) sync-focus rebuild-lines) nil])))
+            [(-> state (assoc :focus-path next) chat/sync-focus view/rebuild-lines) nil])))
 
       ;; Shift+Tab: reverse focus (kept as-is; may not work in tmux with mouse on)
       (and (msg/key-press? msg)
            (msg/key-match? msg :tab)
            (:shift msg)
            (#{:ready :chatting} (:mode state)))
-      (let [paths (focusable-paths (:items state))]
+      (let [paths (chat/focusable-paths (:items state))]
         (if (empty? paths)
           [state nil]
           (let [cur     (:focus-path state)
@@ -822,7 +401,7 @@
                 prev    (if (nil? cur-idx)
                           (last paths)
                           (nth paths (mod (dec cur-idx) n)))]
-            [(-> state (assoc :focus-path prev) sync-focus rebuild-lines) nil])))
+            [(-> state (assoc :focus-path prev) chat/sync-focus view/rebuild-lines) nil])))
 
       ;; Up/Down arrows navigate between focusable items when focus is active;
       ;; fall through to history/scroll handlers when no focus is set
@@ -830,7 +409,7 @@
            (msg/key-match? msg :up)
            (some? (:focus-path state))
            (#{:ready :chatting} (:mode state)))
-      (let [paths (focusable-paths (:items state))]
+      (let [paths (chat/focusable-paths (:items state))]
         (if (empty? paths)
           [state nil]
           (let [cur     (:focus-path state)
@@ -839,13 +418,13 @@
                 prev    (if (nil? cur-idx)
                           (last paths)
                           (nth paths (mod (dec cur-idx) n)))]
-            [(-> state (assoc :focus-path prev) sync-focus rebuild-lines) nil])))
+            [(-> state (assoc :focus-path prev) chat/sync-focus view/rebuild-lines) nil])))
 
       (and (msg/key-press? msg)
            (msg/key-match? msg :down)
            (some? (:focus-path state))
            (#{:ready :chatting} (:mode state)))
-      (let [paths (focusable-paths (:items state))]
+      (let [paths (chat/focusable-paths (:items state))]
         (if (empty? paths)
           [state nil]
           (let [cur     (:focus-path state)
@@ -853,14 +432,14 @@
                 next    (if (nil? cur-idx)
                           (first paths)
                           (nth paths (mod (inc cur-idx) (count paths))))]
-            [(-> state (assoc :focus-path next) sync-focus rebuild-lines) nil])))
+            [(-> state (assoc :focus-path next) chat/sync-focus view/rebuild-lines) nil])))
 
       ;; Focus: Escape clears focus without changing mode
       (and (msg/key-press? msg)
            (msg/key-match? msg :escape)
            (some? (:focus-path state))
            (#{:ready :chatting} (:mode state)))
-      [(-> state (assoc :focus-path nil) sync-focus rebuild-lines) nil]
+      [(-> state (assoc :focus-path nil) chat/sync-focus view/rebuild-lines) nil]
 
       ;; Focus: Enter toggles :expanded? on focused item
       (and (msg/key-press? msg)
@@ -869,7 +448,7 @@
            (#{:ready :chatting} (:mode state)))
       (let [[i j] (:focus-path state)
             item-path (if j [:items i :sub-items j] [:items i])]
-        [(-> state (update-in item-path update :expanded? not) rebuild-lines) nil])
+        [(-> state (update-in item-path update :expanded? not) view/rebuild-lines) nil])
 
       (and (msg/key-press? msg)
            (msg/key-match? msg :enter)
@@ -877,7 +456,7 @@
       (let [text (str/trim (ti/value (:input state)))]
         (cond
           (str/starts-with? text "/")
-          (dispatch-command state text)
+          (commands/dispatch-command state text)
 
           (seq text)
           (let [new-state (-> state
@@ -886,8 +465,8 @@
                               (update :input #(-> % ti/reset ti/blur))
                               (update :input-history conj text)
                               (assoc :history-idx nil)
-                              rebuild-lines)]
-            (send-chat-prompt! (:server state) (:chat-id state) text (:opts state))
+                              view/rebuild-lines)]
+            (chat/send-chat-prompt! (:server state) (:chat-id state) text (:opts state))
             [new-state nil])
 
           :else [state nil]))
@@ -1011,16 +590,16 @@
                  (assoc :chat-id (or chat-id (:chat-id state)))
                  (dissoc :picker)
                  (update :input ti/focus))
-             (when chat-id (open-chat-cmd (:server state) chat-id))])
+             (when chat-id (sessions/open-chat-cmd (:server state) chat-id))])
 
           :command
           (let [idx           (cl/selected-index list)
                 [cmd-name _]  (when (and (some? idx) (< idx (count filtered)))
                                 (nth filtered idx))]
-            (if-let [{:keys [handler]} (when cmd-name (get command-registry cmd-name))]
-              (let [base            (-> state (dissoc :picker) (assoc :mode :ready))
-                    [new-state cmd] (handler base)]
-                (finalize-handler-result new-state cmd))
+            (if cmd-name
+              (commands/run-handler-from-picker
+                (-> state (dissoc :picker) (assoc :mode :ready))
+                cmd-name)
               [state nil]))))
 
       ;; Picker: Escape to cancel
@@ -1041,12 +620,12 @@
       (if (and (= :command (get-in state [:picker :kind]))
                (= "" (get-in state [:picker :query])))
         [(-> state (assoc :mode :ready) (dissoc :picker) (update :input ti/focus)) nil]
-        [(unfilter-picker state) nil])
+        [(picker/unfilter-picker state) nil])
 
       ;; Picker: printable char narrows filter
-      (and (printable-char? msg)
+      (and (commands/printable-char? msg)
            (= :picking (:mode state)))
-      [(filter-picker state (:key msg)) nil]
+      [(picker/filter-picker state (:key msg)) nil]
 
       ;; Picker: navigation keys passed to list-update
       (= :picking (:mode state))
@@ -1110,11 +689,11 @@
       [(update state :scroll-offset #(max 0 (- % 3))) nil]
 
       ;; Autocomplete: "/" as first char in empty :ready input opens command picker
-      (and (printable-char? msg)
+      (and (commands/printable-char? msg)
            (= "/" (:key msg))
            (= :ready (:mode state))
            (= "" (str/trim (ti/value (:input state)))))
-      [(open-command-picker state) nil]
+      [(commands/open-command-picker state) nil]
 
       :else
       (let [[new-input cmd] (ti/text-input-update (:input state) msg)]

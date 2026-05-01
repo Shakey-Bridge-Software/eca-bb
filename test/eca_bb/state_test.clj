@@ -3,14 +3,15 @@
             [charm.components.list :as cl]
             [charm.components.text-input :as ti]
             [charm.message :as msg]
+            [eca-bb.chat :as chat]
             [eca-bb.protocol :as protocol]
             [eca-bb.sessions :as sessions]
             [eca-bb.state :as state]))
 
-(def ^:private flush-current-text   #'state/flush-current-text)
-(def ^:private upsert-tool-call     #'state/upsert-tool-call)
-(def ^:private handle-content       #'state/handle-content)
-(def ^:private handle-eca-tick      #'state/handle-eca-tick)
+(def ^:private flush-current-text       chat/flush-current-text)
+(def ^:private upsert-tool-call         chat/upsert-tool-call)
+(def ^:private handle-content           chat/handle-content)
+(def ^:private handle-eca-tick          #'state/handle-eca-tick)
 (def ^:private handle-eca-notification  #'state/handle-eca-notification)
 (def ^:private handle-providers-updated #'state/handle-providers-updated)
 
@@ -1123,3 +1124,95 @@
                                             :state :called :expanded? false}]}])
           [s _] (state/update-state base (msg/key-press :enter))]
       (is (true? (get-in s [:items 0 :sub-items 0 :expanded?])))))))
+
+;; --- Pre-refactor coverage hardening (Phase A step 1) ---
+;; These tests pin down behaviors that will be split across nses in later steps.
+;; They drive update-state directly so they continue to pass through extraction.
+
+(deftest approving-y-key-approves-and-returns-to-chatting-test
+  (testing "y in :approving calls protocol/approve-tool! and clears pending-approval"
+    (let [calls (atom [])]
+      (with-redefs [protocol/approve-tool! (fn [srv chat-id tc-id]
+                                             (swap! calls conj [srv chat-id tc-id]))]
+        (let [s0 (-> (base-state)
+                     (assoc :mode :approving
+                            :pending-approval {:chat-id "chat1" :tool-call-id "tc1"}
+                            :tool-calls {"tc1" {:id "tc1" :name "read_file"}}))
+              [s _] (state/update-state s0 (msg/key-press "y"))]
+          (is (= :chatting (:mode s)))
+          (is (nil? (:pending-approval s)))
+          (is (= 1 (count @calls)))
+          (is (= "tc1" (nth (first @calls) 2)))
+          (is (= #{} (:session-trusted-tools s))))))))
+
+(deftest approving-Y-key-approves-and-trusts-tool-test
+  (testing "Y in :approving approves AND adds tool name to session-trusted-tools"
+    (with-redefs [protocol/approve-tool! (fn [& _] nil)]
+      (let [s0 (-> (base-state)
+                   (assoc :mode :approving
+                          :pending-approval {:chat-id "chat1" :tool-call-id "tc1"}
+                          :tool-calls {"tc1" {:id "tc1" :name "read_file"}}))
+            [s _] (state/update-state s0 (msg/key-press "Y"))]
+        (is (= :chatting (:mode s)))
+        (is (nil? (:pending-approval s)))
+        (is (contains? (:session-trusted-tools s) "read_file"))))))
+
+(deftest approving-n-key-rejects-and-returns-to-chatting-test
+  (testing "n in :approving calls protocol/reject-tool! and clears pending-approval"
+    (let [calls (atom [])]
+      (with-redefs [protocol/reject-tool! (fn [srv chat-id tc-id]
+                                            (swap! calls conj [srv chat-id tc-id]))]
+        (let [s0 (-> (base-state)
+                     (assoc :mode :approving
+                            :pending-approval {:chat-id "chat1" :tool-call-id "tc1"}
+                            :tool-calls {"tc1" {:id "tc1" :name "read_file"}}))
+              [s _] (state/update-state s0 (msg/key-press "n"))]
+          (is (= :chatting (:mode s)))
+          (is (nil? (:pending-approval s)))
+          (is (= 1 (count @calls)))
+          (is (= "tc1" (nth (first @calls) 2))))))))
+
+(deftest ready-enter-sends-chat-prompt-test
+  (testing "Enter in :ready with non-slash text sends prompt and enters :chatting"
+    (let [prompts (atom [])]
+      (with-redefs [protocol/chat-prompt! (fn [srv params _cb]
+                                            (swap! prompts conj params))]
+        (let [s0 (-> (base-state)
+                     (assoc :mode :ready
+                            :input (ti/set-value (ti/text-input) "hello world")))
+              [s _] (state/update-state s0 (msg/key-press :enter))]
+          (is (= :chatting (:mode s)))
+          (is (= "hello world" (:pending-message s)))
+          (is (some #(and (= :user (:type %)) (= "hello world" (:text %))) (:items s)))
+          (is (= 1 (count @prompts)))
+          (is (= "hello world" (:message (first @prompts))))
+          (is (= "chat1" (:chat-id (first @prompts)))))))))
+
+(deftest ready-enter-empty-input-noop-test
+  (testing "Enter in :ready with empty input is a no-op (no prompt sent, mode unchanged)"
+    (let [prompts (atom [])]
+      (with-redefs [protocol/chat-prompt! (fn [& _] (swap! prompts conj :sent))]
+        (let [s0 (assoc (base-state) :mode :ready)
+              [s _] (state/update-state s0 (msg/key-press :enter))]
+          (is (= :ready (:mode s)))
+          (is (empty? @prompts)))))))
+
+(deftest window-size-rebuilds-chat-lines-test
+  (testing ":window-size message updates width/height and rebuilds chat lines"
+    (let [s0 (-> (base-state)
+                 (assoc :width 80 :height 24
+                        :items [{:type :assistant-text :text "hello"}]
+                        :chat-lines []))
+          [s cmd] (state/update-state s0 {:type :window-size :width 120 :height 40})]
+      (is (= 120 (:width s)))
+      (is (= 40 (:height s)))
+      (is (seq (:chat-lines s)) "chat-lines should be rebuilt from :items")
+      (is (nil? cmd)))))
+
+(deftest ctrl-c-fires-shutdown-cmd-test
+  (testing "Ctrl+C returns a non-nil shutdown cmd without changing state"
+    (let [s0 (assoc (base-state) :mode :ready)
+          [s cmd] (state/update-state s0 (msg/key-press "c" :ctrl true))]
+      (is (= s0 s) "state should be unchanged")
+      (is (some? cmd) "shutdown cmd should be returned")
+      (is (= :sequence (:type cmd)) "shutdown cmd should be a charm batch sequence"))))

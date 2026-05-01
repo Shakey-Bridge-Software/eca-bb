@@ -135,6 +135,14 @@
                      (conj (vec lines) "")))))
        vec))
 
+
+(defn rebuild-lines
+  "Rebuild a state's :chat-lines from its :items / :current-text / :width.
+  Lives here (leaf util) because every feature ns calls it."
+  [state]
+  (assoc state :chat-lines
+         (rebuild-chat-lines (:items state) (:current-text state) (:width state))))
+
 (defn- pad-to-height [lines height]
   (let [n (count lines)]
     (if (>= n height)
