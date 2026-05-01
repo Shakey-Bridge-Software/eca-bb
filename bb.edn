@@ -11,6 +11,7 @@
          test        {:doc "Run unit tests"
                       :task (do (require '[clojure.test])
                                 (require '[eca-bb.commands-test])
+                                (require '[eca-bb.lifecycle-test])
                                 (require '[eca-bb.protocol-test])
                                 (require '[eca-bb.view-test])
                                 (require '[eca-bb.state-test])
@@ -18,6 +19,7 @@
                                 (require '[eca-bb.upgrade-test])
                                 (let [{:keys [fail error]}
                                       (clojure.test/run-tests 'eca-bb.commands-test
+                                                              'eca-bb.lifecycle-test
                                                               'eca-bb.protocol-test
                                                               'eca-bb.view-test
                                                               'eca-bb.state-test
