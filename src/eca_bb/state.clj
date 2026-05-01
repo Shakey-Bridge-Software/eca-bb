@@ -227,7 +227,7 @@
        (str/starts-with? (str/trim (ti/value (:input state))) "/")))
 
 (defn- autocomplete-slash? [state msg]
-  (and (commands/printable-char? msg)
+  (and (picker/printable-char? msg)
        (= "/" (:key msg))
        (= :ready (:mode state))
        (= "" (str/trim (ti/value (:input state))))))
@@ -292,69 +292,23 @@
       (= :login (:mode state))      (login/handle-key state msg)
       (= :approving (:mode state))  (chat/handle-approval-key state msg)
 
-      ;; --- :picking arms (inline; step 9 to extract) ---
-      (and (msg/key-press? msg) (msg/key-match? msg :enter) (= :picking (:mode state)))
-      (let [{:keys [kind list filtered]} (:picker state)]
-        (case kind
-          (:model :agent)
-          (let [selected (cl/selected-item list)]
-            (if selected
-              (do
-                (if (= :model kind)
-                  (protocol/selected-model-changed! (:server state) selected)
-                  (protocol/selected-agent-changed! (:server state) selected))
-                [(-> state
-                     (assoc :mode :ready)
-                     (assoc (if (= :model kind) :selected-model :selected-agent) selected)
-                     (cond-> (= :model kind) (assoc :selected-variant nil))
-                     (assoc-in [:opts (if (= :model kind) :model :agent)] selected)
-                     (dissoc :picker)
-                     (update :input ti/focus))
-                 nil])
-              [state nil]))
+      ;; Command-picker selection lives here so picker.clj can stay free
+      ;; of a commands.clj dependency (which would create a cycle).
+      (and (msg/key-press? msg) (msg/key-match? msg :enter)
+           (= :picking (:mode state))
+           (= :command (get-in state [:picker :kind])))
+      (let [{:keys [list filtered]} (:picker state)
+            idx                     (cl/selected-index list)
+            [cmd-name _]            (when (and (some? idx) (< idx (count filtered)))
+                                      (nth filtered idx))]
+        (if cmd-name
+          (commands/run-handler-from-picker
+            (-> state (dissoc :picker) (assoc :mode :ready))
+            cmd-name)
+          [state nil]))
 
-          :session
-          (let [idx                (cl/selected-index list)
-                [_display chat-id] (when (and (some? idx) (< idx (count filtered)))
-                                     (nth filtered idx))]
-            (when chat-id
-              (sessions/save-chat-id! (get-in state [:opts :workspace]) chat-id))
-            [(-> state
-                 (assoc :mode :ready :items [] :chat-lines [] :scroll-offset 0)
-                 (assoc :chat-id (or chat-id (:chat-id state)))
-                 (dissoc :picker)
-                 (update :input ti/focus))
-             (when chat-id (sessions/open-chat-cmd (:server state) chat-id))])
-
-          :command
-          (let [idx          (cl/selected-index list)
-                [cmd-name _] (when (and (some? idx) (< idx (count filtered)))
-                               (nth filtered idx))]
-            (if cmd-name
-              (commands/run-handler-from-picker
-                (-> state (dissoc :picker) (assoc :mode :ready))
-                cmd-name)
-              [state nil]))))
-
-      (and (msg/key-press? msg) (msg/key-match? msg :escape) (= :picking (:mode state)))
-      [(-> state (assoc :mode :ready) (dissoc :picker) (update :input ti/focus)) nil]
-
-      (and (msg/key-press? msg) (msg/key-match? msg :backspace) (= :picking (:mode state)))
-      (if (and (= :command (get-in state [:picker :kind]))
-               (= "" (get-in state [:picker :query])))
-        [(-> state (assoc :mode :ready) (dissoc :picker) (update :input ti/focus)) nil]
-        [(picker/unfilter-picker state) nil])
-
-      (and (commands/printable-char? msg) (= :picking (:mode state)))
-      [(picker/filter-picker state (:key msg)) nil]
-
-      (= :picking (:mode state))
-      (let [[new-list _] (cl/list-update (get-in state [:picker :list]) msg)]
-        [(assoc-in state [:picker :list] new-list) nil])
-
-      ;; --- :ready / :chatting → chat/handle-key ---
-      (#{:ready :chatting} (:mode state))
-      (chat/handle-key state msg)
+      (= :picking (:mode state))           (picker/handle-key state msg)
+      (#{:ready :chatting} (:mode state))  (chat/handle-key state msg)
 
       :else [state nil])))
 

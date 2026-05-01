@@ -5,7 +5,6 @@
             [charm.program :as program]
             [charm.components.list :as cl]
             [charm.components.text-input :as ti]
-            [charm.message :as msg]
             [eca-bb.protocol :as protocol]
             [eca-bb.server :as server]
             [eca-bb.sessions :as sessions]
@@ -113,9 +112,3 @@
       (finalize-handler-result new-state cmd))
     [state nil]))
 
-(defn printable-char? [msg]
-  (and (msg/key-press? msg)
-       (string? (:key msg))
-       (= 1 (count (:key msg)))
-       (not (:ctrl msg))
-       (not (:alt msg))))
